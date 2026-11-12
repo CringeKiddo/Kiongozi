@@ -184,18 +184,79 @@ def export_and_validate(wrapper, dummy, ref_outs, tmp_path: Path, opset: int,
 # --------------------------------------------------------------------------
 # Precision conversion
 # --------------------------------------------------------------------------
-def convert_precision(src: Path, dst: Path, precision: str) -> None:
+def _clear_value_info(model):
+    """Stale intermediate type annotations are the usual cause of fp16 'Type Error' load failures."""
+    del model.graph.value_info[:]
+    return model
+
+
+def _ort_load_status(path: Path):
+    """Create a desktop ORT session (type-checks the graph). Returns (status, message)."""
+    import onnxruntime as ort
+
+    try:
+        so = ort.SessionOptions()
+        so.log_severity_level = 3
+        ort.InferenceSession(str(path), so, providers=["CPUExecutionProvider"])
+        return "ok", ""
+    except Exception as exc:
+        msg = str(exc)
+        if "Type Error" in msg or "does not match expected type" in msg:
+            return "type_error", msg
+        if "NOT_IMPLEMENTED" in msg or "Could not find an implementation" in msg:
+            return "no_kernel", msg  # graph is valid, desktop CPU just lacks an fp16 kernel
+        return "other", msg
+
+
+def convert_fp16(src: Path, dst: Path):
+    """Try several fp16 converters; accept the first graph that ORT does not reject on types."""
     import onnx
 
-    if precision == "fp32":
-        shutil.copyfile(src, dst)
-    elif precision == "fp16":
+    def via_ort_transformers(m):
+        from onnxruntime.transformers.float16 import convert_float_to_float16
+
+        return convert_float_to_float16(m, keep_io_types=True)
+
+    def via_onnxconverter(m):
         from onnxconverter_common import float16
 
-        model = onnx.load(str(src))
-        model16 = float16.convert_float_to_float16(model, keep_io_types=True)
-        onnx.save(model16, str(dst))
-    elif precision == "int8":
+        return float16.convert_float_to_float16(m, keep_io_types=True)
+
+    def via_onnxconverter_blocklist(m):
+        from onnxconverter_common import float16
+
+        block = list(float16.DEFAULT_OP_BLOCK_LIST) + [
+            "LayerNormalization", "Softmax", "ReduceMean", "Pow", "Sqrt", "Div", "Where", "Erf",
+        ]
+        return float16.convert_float_to_float16(m, keep_io_types=True, op_block_list=block)
+
+    variants = [
+        ("onnxruntime.transformers.float16", via_ort_transformers),
+        ("onnxconverter_common", via_onnxconverter),
+        ("onnxconverter_common + op block list", via_onnxconverter_blocklist),
+    ]
+    for name, fn in variants:
+        log(f"fp16 conversion attempt: {name}")
+        try:
+            model = _clear_value_info(onnx.load(str(src)))
+            m16 = _clear_value_info(fn(model))
+            onnx.save(m16, str(dst))
+            status, msg = _ort_load_status(dst)
+            log(f"  desktop onnxruntime load check -> {status}")
+            if status in ("ok", "no_kernel"):
+                return name
+            log(f"  {msg[:300]}")
+        except Exception as exc:
+            log(f"  failed: {type(exc).__name__}: {str(exc)[:300]}")
+    return None
+
+
+def convert_precision(src: Path, dst: Path, precision: str) -> str:
+    """Write dst and return the precision actually written (fp16 may fall back to fp32)."""
+    if precision == "fp32":
+        shutil.copyfile(src, dst)
+        return "fp32"
+    if precision == "int8":
         from onnxruntime.quantization import QuantType, quantize_dynamic
 
         quantize_dynamic(
@@ -203,8 +264,17 @@ def convert_precision(src: Path, dst: Path, precision: str) -> None:
             weight_type=QuantType.QInt8,
             op_types_to_quantize=["MatMul", "Gemm"],
         )
-    else:
-        raise ValueError(precision)
+        return "int8"
+    if precision == "fp16":
+        used = convert_fp16(src, dst)
+        if used is None:
+            log("WARNING: every fp16 conversion variant was rejected with a type error. "
+                "FALLING BACK to fp32 so the build still works (model will be ~2x larger).")
+            shutil.copyfile(src, dst)
+            return "fp32"
+        log(f"fp16 conversion variant used: {used}")
+        return "fp16"
+    raise ValueError(precision)
 
 
 def tensor_shape(value_info) -> list:
@@ -352,7 +422,8 @@ def main() -> int:
     log(f"fp32 model size: {fp32_mb:.1f} MB")
 
     banner(f"Converting to {args.precision}")
-    convert_precision(fp32_path, out, args.precision)
+    effective = convert_precision(fp32_path, out, args.precision)
+    log(f"precision written: {effective} (requested: {args.precision})")
     final_mb = out.stat().st_size / 1e6
     log(f"final model size: {final_mb:.1f} MB -> {out}")
     if final_mb < 0.5:
@@ -367,10 +438,10 @@ def main() -> int:
         final_diff = max_diff(outs, ref_np)
         log(f"final model vs PyTorch max |diff| = {final_diff:.3e}")
     except Exception as exc:
-        if args.precision == "fp32":
+        if effective == "fp32":
             log(f"ERROR: final fp32 model failed to run: {exc!r}")
             return 1
-        log(f"WARNING: desktop onnxruntime could not run the {args.precision} model: "
+        log(f"WARNING: desktop onnxruntime could not run the {effective} model: "
             f"{str(exc)[:300]}")
         log("         This is expected if the CPU provider lacks fp16/int8 kernels. "
             "The Android smoke test on your phone is the real check.")
@@ -396,7 +467,8 @@ def main() -> int:
     spec = {
         "model": {
             "checkpoint": args.checkpoint,
-            "precision": args.precision,
+            "precision": effective,
+            "requested_precision": args.precision,
             "file": out.name,
             "size_mb": round(final_mb, 2),
             "fp32_size_mb": round(fp32_mb, 2),
@@ -438,7 +510,7 @@ def main() -> int:
     print(f"\nFRONTEND  sample_rate={SAMPLE_RATE} Hz  n_fft={N_FFT}  hop={HOP_LENGTH}  "
           f"n_mels={N_MELS}  f_min={F_MIN}  f_max={F_MAX}  fps={FPS:.1f}")
     print(f"CHUNK     {CHUNK_FRAMES} frames = {CHUNK_FRAMES / FPS:.0f} s per inference call")
-    print(f"MODEL     {out}  ({final_mb:.1f} MB, {args.precision})")
+    print(f"MODEL     {out}  ({final_mb:.1f} MB, {effective})")
     print(f"SPEC      {spec_path}")
 
     shutil.rmtree(tmp_dir, ignore_errors=True)
