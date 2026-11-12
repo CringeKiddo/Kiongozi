@@ -1,0 +1,162 @@
+name: Build Kiongozi
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      checkpoint:
+        description: "beat_this checkpoint"
+        type: choice
+        default: final0
+        options: [final0, small0, final1, final2]
+      precision:
+        description: "ONNX precision"
+        type: choice
+        default: fp16
+        options: [fp16, fp32, int8]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CHECKPOINT: ${{ inputs.checkpoint || 'final0' }}
+  PRECISION: ${{ inputs.precision || 'fp16' }}
+  # Bump this string to force a fresh model export (invalidates the cache).
+  MODEL_CACHE_VERSION: v1
+  MODEL_DIR: app/src/main/assets/models
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ------------------------------------------------------------------
+      # 1) ONNX model: restore from cache, or export it
+      #    (export runs on the GitHub CPU runner; no GPU needed for that.
+      #     GPU is used later, on your phone, at inference time.)
+      # ------------------------------------------------------------------
+      - name: Restore ONNX model cache
+        id: model-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.MODEL_DIR }}/beat_this.onnx
+            ${{ env.MODEL_DIR }}/beat_this_spec.json
+            ${{ env.MODEL_DIR }}/mel_filterbank_f32.bin
+            build/golden
+          key: beat-this-onnx-${{ env.MODEL_CACHE_VERSION }}-${{ env.CHECKPOINT }}-${{ env.PRECISION }}-${{ hashFiles('scripts/export_beat_this.py') }}
+
+      - name: Report cache status
+        run: |
+          echo "Cache hit: ${{ steps.model-cache.outputs.cache-hit }}"
+          echo "Checkpoint: $CHECKPOINT | Precision: $PRECISION"
+
+      - name: Set up Python
+        if: steps.model-cache.outputs.cache-hit != 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install export dependencies
+        if: steps.model-cache.outputs.cache-hit != 'true'
+        run: |
+          python -m pip install --upgrade pip
+          # CPU-only torch keeps the download small and avoids CUDA wheels
+          pip install torch==2.5.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cpu
+          pip install "numpy<2" onnx onnxscript onnxruntime onnxconverter-common
+          pip install https://github.com/CPJKU/beat_this/archive/main.zip
+          pip list | grep -i -E "torch|onnx|beat|numpy|einops|rotary"
+
+      - name: Export beat_this to ONNX
+        if: steps.model-cache.outputs.cache-hit != 'true'
+        run: |
+          python scripts/export_beat_this.py \
+            --checkpoint "$CHECKPOINT" \
+            --precision "$PRECISION" \
+            --out "$MODEL_DIR/beat_this.onnx" \
+            --golden-dir build/golden
+
+      - name: Verify model files exist
+        run: |
+          set -e
+          echo "=== Model directory ==="
+          ls -lh "$MODEL_DIR"
+          test -s "$MODEL_DIR/beat_this.onnx" || { echo "::error::beat_this.onnx is missing or empty"; exit 1; }
+          test -s "$MODEL_DIR/beat_this_spec.json" || { echo "::error::beat_this_spec.json is missing"; exit 1; }
+          echo "=== beat_this_spec.json ==="
+          cat "$MODEL_DIR/beat_this_spec.json"
+          {
+            echo "## beat_this ONNX export"
+            echo "- checkpoint: \`$CHECKPOINT\`  precision: \`$PRECISION\`  cache hit: \`${{ steps.model-cache.outputs.cache-hit }}\`"
+            echo "- size: $(du -h "$MODEL_DIR/beat_this.onnx" | cut -f1)"
+            echo '```json'
+            cat "$MODEL_DIR/beat_this_spec.json"
+            echo
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload model + spec + golden vectors
+        uses: actions/upload-artifact@v4
+        with:
+          name: beat_this-model-and-spec
+          path: |
+            ${{ env.MODEL_DIR }}/beat_this.onnx
+            ${{ env.MODEL_DIR }}/beat_this_spec.json
+            ${{ env.MODEL_DIR }}/mel_filterbank_f32.bin
+            build/golden
+          if-no-files-found: error
+          retention-days: 30
+
+      # ------------------------------------------------------------------
+      # 2) Android build
+      # ------------------------------------------------------------------
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "platforms;android-35 build-tools;34.0.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.10.2"
+
+      - name: Generate Gradle wrapper if missing
+        run: |
+          if [ ! -f gradlew ]; then
+            echo "gradlew not found, generating wrapper"
+            gradle wrapper --gradle-version 8.10.2
+          fi
+          chmod +x gradlew
+          ./gradlew --version
+
+      - name: Build debug APK
+        run: ./gradlew assembleDebug --stacktrace
+
+      - name: Rename APK and verify it contains the model
+        run: |
+          set -e
+          cp app/build/outputs/apk/debug/app-debug.apk Kiongozi-debug.apk
+          ls -lh Kiongozi-debug.apk
+          echo "=== Model inside APK? ==="
+          unzip -l Kiongozi-debug.apk | grep -E "assets/models/" || { echo "::error::model assets missing from APK"; exit 1; }
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Kiongozi-debug
+          path: Kiongozi-debug.apk
+          if-no-files-found: error
+          retention-days: 30
