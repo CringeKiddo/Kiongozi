@@ -65,8 +65,11 @@ fun TitleScreen() {
     var pickedSong by remember { mutableStateOf<String?>(null) }
     var mode by remember { mutableStateOf(GameMode.LANES) }
     var modelCheck by remember { mutableStateOf<ModelCheck?>(null) }
+    var liveLines by remember { mutableStateOf(listOf<String>()) }
 
-    LaunchedEffect(Unit) { modelCheck = OnnxSmokeTest.run(context) }
+    LaunchedEffect(Unit) {
+        modelCheck = OnnxSmokeTest.run(context) { liveLines = it }
+    }
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
@@ -243,9 +246,10 @@ fun TitleScreen() {
                     letterSpacing = 2.sp,
                     modifier = if (check == null) Modifier.alpha(pulse) else Modifier,
                 )
-                if (check != null) {
+                val shown = check?.lines ?: liveLines
+                if (shown.isNotEmpty()) {
                     Spacer(Modifier.height(8.dp))
-                    check.lines.forEach {
+                    shown.forEach {
                         Text(
                             text = it,
                             color = Neon.TextDim,
