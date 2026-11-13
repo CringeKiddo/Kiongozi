@@ -83,7 +83,8 @@ class ChartCacheManager(private val context: Context) {
         if (!f.exists()) return null
         return try {
             DataInputStream(f.inputStream().buffered()).use { s ->
-                if (s.readInt() != MAGIC) return null
+                val magic = s.readInt()
+                if (magic != MAGIC_V1 && magic != MAGIC) return null
                 val duration = s.readLong()
                 val bpm = s.readDouble()
                 val bpb = s.readInt()
@@ -93,7 +94,14 @@ class ChartCacheManager(private val context: Context) {
                 val flux = FloatArray(frames) { s.readFloat() }
                 val centroid = FloatArray(frames) { s.readFloat() }
                 val energy = FloatArray(frames) { s.readFloat() }
-                Analysis(duration, bpm, bpb, beats, downs, flux, centroid, energy)
+                if (magic == MAGIC && s.readBoolean()) {
+                    val bf = Array(3) { FloatArray(frames) { s.readFloat() } }
+                    val be = Array(3) { FloatArray(frames) { s.readFloat() } }
+                    val bc = Array(3) { FloatArray(frames) { s.readFloat() } }
+                    Analysis(duration, bpm, bpb, beats, downs, flux, centroid, energy, bf, be, bc)
+                } else {
+                    Analysis(duration, bpm, bpb, beats, downs, flux, centroid, energy)
+                }
             }
         } catch (_: Exception) {
             null
@@ -117,6 +125,12 @@ class ChartCacheManager(private val context: Context) {
                     analysis.flux.forEach { s.writeFloat(it) }
                     analysis.centroid.forEach { s.writeFloat(it) }
                     analysis.energy.forEach { s.writeFloat(it) }
+                    s.writeBoolean(analysis.hasBands)
+                    if (analysis.hasBands) {
+                        analysis.bandFlux!!.forEach { arr -> arr.forEach { s.writeFloat(it) } }
+                        analysis.bandEnergy!!.forEach { arr -> arr.forEach { s.writeFloat(it) } }
+                        analysis.bandCentroid!!.forEach { arr -> arr.forEach { s.writeFloat(it) } }
+                    }
                 }
             }
         }
@@ -179,6 +193,7 @@ class ChartCacheManager(private val context: Context) {
     }
 
     private companion object {
-        const val MAGIC = 0x4B474131 // "KGA1"
+        const val MAGIC_V1 = 0x4B474131 // "KGA1" (Batch 2: no frequency layers)
+        const val MAGIC = 0x4B474132    // "KGA2"
     }
 }

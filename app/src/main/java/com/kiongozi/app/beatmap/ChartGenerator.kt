@@ -13,28 +13,38 @@ import kotlin.math.sqrt
 import kotlin.random.Random
 
 /**
- * Procedural chart generator.
+ * Procedural chart generator (v2: multi-layer).
  *
- * Grid:   beat_this beats, each split into 4 slots (quarter / 8th / 16th positions).
- * Onsets: spectral-flux peaks decide which off-beat slots are worth a note.
- * Holds:  sustained energy after an onset with no new strong onset inside it.
- * Lanes:  spectral centroid (pitch/brightness) quantiles -> lane 0..4 (low = left, high = right).
+ * Grid:    beat_this beats, each split into 4 slots (quarter / 8th / 16th positions).
+ * Layers:  the song is analysed in three frequency layers (bass / mid / high), each with its OWN
+ *          onset detection normalised to its own loudness. A quiet arpeggio or vocal line in the
+ *          mid layer is therefore found even when a loud bass sits underneath it.
+ * Easy / Normal follow the main beat (+ strong 8ths). Hard / Expert react to the independent layers:
+ *          bass hits go to the left lanes, the melody / arpeggio stream to the middle lanes, highs to the
+ *          right lanes, and simultaneous layers become chords, so the chart is genuinely denser
+ *          and more polyrhythmic as difficulty rises.
+ * Holds:   sustained energy in the layer that triggered the note (so long vocal / lead notes become holds).
  * Targets: per-bar geometric paths (arc, wave, circle, diagonal, V, figure-8) for Project DIVA mode.
- * Fully deterministic for a given song (seeded from the song key), so a cached chart equals a rebuilt one.
+ * Deterministic for a given song (seeded from the song key).
  */
 object ChartGenerator {
     /** Bump when rules change; cached charts with an older version get rebuilt from cached analysis. */
-    const val VERSION = 1
+    const val VERSION = 2
+
+    private const val BASS = 0
+    private const val MID = 1
+    private const val HIGH = 2
 
     private val PIf = PI.toFloat()
 
     private class Params(
         val minGapMs: Long,
-        val thr8: Float,          // flux ratio needed for an 8th slot; < 0 = disabled
-        val thr16: Float,         // flux ratio needed for a 16th slot; < 0 = disabled
-        val thrChord: Float,      // flux ratio needed for a chord; < 0 = no chords
+        val thr8: FloatArray,     // per layer: flux ratio needed for an 8th slot; < 0 = layer ignored
+        val thr16: FloatArray,    // per layer: flux ratio needed for a 16th slot; < 0 = layer ignored
+        val thrChord: Float,      // single-layer "big hit" double threshold; < 0 = none
         val chordCooldown: Int,
         val maxChordSize: Int,
+        val layerLanes: Boolean,  // lanes follow the frequency layers (Hard / Expert)
         val holdsEnabled: Boolean,
         val holdOnlyDownbeats: Boolean,
         val holdMinBeats: Int,
@@ -48,28 +58,32 @@ object ChartGenerator {
         val notesDuringHold: Boolean,
     )
 
+    private val OFF = floatArrayOf(-1f, -1f, -1f)
+
     private fun paramsFor(d: Difficulty): Params = when (d) {
         Difficulty.EASY -> Params(
-            minGapMs = 350, thr8 = -1f, thr16 = -1f, thrChord = -1f, chordCooldown = 0, maxChordSize = 1,
-            holdsEnabled = false, holdOnlyDownbeats = false, holdMinBeats = 0, holdMaxBeats = 0,
+            minGapMs = 350, thr8 = OFF, thr16 = OFF, thrChord = -1f, chordCooldown = 0, maxChordSize = 1,
+            layerLanes = false, holdsEnabled = false, holdOnlyDownbeats = false, holdMinBeats = 0, holdMaxBeats = 0,
             holdCooldownBeats = 0, sustainRatio = 0f, allowJacks = false, minJackGapMs = 0,
             maxLaneJump = 2, skipBeatsIfFast = true, notesDuringHold = false,
         )
         Difficulty.NORMAL -> Params(
-            minGapMs = 170, thr8 = 2.0f, thr16 = -1f, thrChord = -1f, chordCooldown = 0, maxChordSize = 1,
-            holdsEnabled = true, holdOnlyDownbeats = true, holdMinBeats = 2, holdMaxBeats = 3,
+            minGapMs = 170, thr8 = floatArrayOf(2.0f, 2.0f, -1f), thr16 = OFF, thrChord = -1f, chordCooldown = 0, maxChordSize = 1,
+            layerLanes = false, holdsEnabled = true, holdOnlyDownbeats = true, holdMinBeats = 2, holdMaxBeats = 3,
             holdCooldownBeats = 6, sustainRatio = 0.65f, allowJacks = false, minJackGapMs = 0,
             maxLaneJump = 3, skipBeatsIfFast = false, notesDuringHold = false,
         )
         Difficulty.HARD -> Params(
-            minGapMs = 110, thr8 = 1.5f, thr16 = 2.2f, thrChord = 2.6f, chordCooldown = 5, maxChordSize = 2,
-            holdsEnabled = true, holdOnlyDownbeats = false, holdMinBeats = 1, holdMaxBeats = 4,
+            minGapMs = 105, thr8 = floatArrayOf(1.5f, 1.4f, 2.6f), thr16 = floatArrayOf(2.4f, 1.8f, -1f),
+            thrChord = 2.8f, chordCooldown = 4, maxChordSize = 2,
+            layerLanes = true, holdsEnabled = true, holdOnlyDownbeats = false, holdMinBeats = 1, holdMaxBeats = 4,
             holdCooldownBeats = 3, sustainRatio = 0.6f, allowJacks = true, minJackGapMs = 200,
             maxLaneJump = 4, skipBeatsIfFast = false, notesDuringHold = true,
         )
         Difficulty.EXPERT -> Params(
-            minGapMs = 80, thr8 = 1.1f, thr16 = 1.4f, thrChord = 2.0f, chordCooldown = 2, maxChordSize = 3,
-            holdsEnabled = true, holdOnlyDownbeats = false, holdMinBeats = 1, holdMaxBeats = 4,
+            minGapMs = 75, thr8 = floatArrayOf(1.1f, 1.1f, 1.6f), thr16 = floatArrayOf(1.6f, 1.25f, 1.8f),
+            thrChord = 2.2f, chordCooldown = 1, maxChordSize = 3,
+            layerLanes = true, holdsEnabled = true, holdOnlyDownbeats = false, holdMinBeats = 1, holdMaxBeats = 4,
             holdCooldownBeats = 1, sustainRatio = 0.5f, allowJacks = true, minJackGapMs = 0,
             maxLaneJump = 4, skipBeatsIfFast = false, notesDuringHold = true,
         )
@@ -82,8 +96,20 @@ object ChartGenerator {
         val beats: LongArray = a.beatsMs
         val n = beats.size
         val frames = a.frameCount
+
+        // per-layer features (fallback to overall features if a legacy analysis slipped through)
+        val lf: Array<FloatArray> = a.bandFlux ?: arrayOf(a.flux, a.flux, FloatArray(frames))
+        val le: Array<FloatArray> = a.bandEnergy ?: arrayOf(a.energy, a.energy, a.energy)
+        val lc: Array<FloatArray> = a.bandCentroid ?: arrayOf(a.centroid, a.centroid, a.centroid)
+
+        val layerRatio = Array(3) { FloatArray(frames) }
+        val layerStrength = Array(3) { FloatArray(n * 4) }
+        val layerGate = FloatArray(3)
+        val layerCuts = Array(3) { FloatArray(3) }   // centroid quantiles 33% / 50% / 66% per layer
+        val strength = FloatArray(n * 4)             // max over layers
+
+        // overall features: used for Easy / Normal lanes and the loudness gate
         val fluxRatio = FloatArray(frames)
-        val strength = FloatArray(n * 4)
         val gate: Float
         val cuts = FloatArray(4)
         val downIdx = BooleanArray(n)
@@ -91,21 +117,62 @@ object ChartGenerator {
         val medianInterval: Double
 
         init {
-            // median beat interval
             val iv = LongArray(max(n - 1, 1)) { if (n > 1) beats[it + 1] - beats[it] else 500L }
             iv.sort()
             medianInterval = iv[iv.size / 2].toDouble().coerceAtLeast(120.0)
 
-            // flux peak ratio vs. local mean (+/- 2 s)
+            peakRatios(a.flux, fluxRatio)
+            for (l in 0 until 3) {
+                peakRatios(lf[l], layerRatio[l])
+                assignToSlots(layerRatio[l], layerStrength[l])
+                val se = le[l].copyOf()
+                se.sort()
+                layerGate[l] = if (se.isNotEmpty()) 0.15f * se[se.size / 2] else 0f
+
+                val cv = ArrayList<Float>()
+                for (f in 0 until frames) if (layerRatio[l][f] >= 1.5f) cv.add(layerCentroidAt(l, f))
+                if (cv.size < 20) for (f in 0 until frames step 5) cv.add(lc[l][f])
+                cv.sort()
+                if (cv.isEmpty()) cv.add(0.5f)
+                layerCuts[l][0] = cv[(cv.size * 33 / 100).coerceIn(0, cv.size - 1)]
+                layerCuts[l][1] = cv[(cv.size * 50 / 100).coerceIn(0, cv.size - 1)]
+                layerCuts[l][2] = cv[(cv.size * 66 / 100).coerceIn(0, cv.size - 1)]
+            }
+            for (gi in 0 until n * 4) strength[gi] = max(layerStrength[0][gi], max(layerStrength[1][gi], layerStrength[2][gi]))
+
+            val sortedE = a.energy.copyOf()
+            sortedE.sort()
+            gate = if (sortedE.isNotEmpty()) 0.15f * sortedE[sortedE.size / 2] else 0f
+
+            val cv = ArrayList<Float>()
+            for (f in 0 until frames) if (fluxRatio[f] >= 1.5f) cv.add(centroidAt(f))
+            for (i in 0 until n) cv.add(centroidAt(frameOf(beats[i])))
+            if (cv.size < 20) for (f in 0 until frames step 5) cv.add(a.centroid[f])
+            cv.sort()
+            for (j in 0 until 4) cuts[j] = if (cv.isEmpty()) 0.5f else cv[((j + 1) * cv.size / 5).coerceIn(0, cv.size - 1)]
+
+            var firstDown = -1
+            for (db in a.downbeatsMs) {
+                val idx = java.util.Arrays.binarySearch(beats, db)
+                if (idx >= 0) {
+                    downIdx[idx] = true
+                    if (firstDown < 0 || idx < firstDown) firstDown = idx
+                }
+            }
+            phase = if (firstDown >= 0) firstDown else 0
+        }
+
+        /** Local-peak onsets of a flux curve, as ratio to the local (+/- 2 s) mean flux. */
+        private fun peakRatios(flux: FloatArray, out: FloatArray) {
             val prefix = DoubleArray(frames + 1)
-            for (i in 0 until frames) prefix[i + 1] = prefix[i] + a.flux[i]
+            for (i in 0 until frames) prefix[i + 1] = prefix[i] + flux[i]
             for (f in 0 until frames) {
                 var isPeak = true
                 for (d in -2..2) {
                     if (d == 0) continue
                     val j = f + d
                     if (j < 0 || j >= frames) continue
-                    if (a.flux[j] > a.flux[f] || (a.flux[j] == a.flux[f] && d < 0)) {
+                    if (flux[j] > flux[f] || (flux[j] == flux[f] && d < 0)) {
                         isPeak = false
                         break
                     }
@@ -114,13 +181,15 @@ object ChartGenerator {
                 val lo = max(0, f - 100)
                 val hi = min(frames, f + 101)
                 val mean = (prefix[hi] - prefix[lo]) / (hi - lo)
-                val ratio = (a.flux[f] / (mean + 1e-4)).toFloat()
-                if (ratio >= 1f) fluxRatio[f] = ratio
+                val ratio = (flux[f] / (mean + 1e-4)).toFloat()
+                if (ratio >= 1f) out[f] = ratio
             }
+        }
 
-            // assign every flux peak to its nearest beat-grid slot
+        /** Assign every onset peak to its nearest beat-grid slot (keeps the strongest per slot). */
+        private fun assignToSlots(ratio: FloatArray, out: FloatArray) {
             for (f in 0 until frames) {
-                val r = fluxRatio[f]
+                val r = ratio[f]
                 if (r <= 0f) continue
                 val t = f.toLong() * Analysis.FRAME_MS
                 var i = java.util.Arrays.binarySearch(beats, t)
@@ -135,32 +204,8 @@ object ChartGenerator {
                     i == n - 1 && kk > 0 -> -1
                     else -> i * 4 + kk
                 }
-                if (gi >= 0 && r > strength[gi]) strength[gi] = r
+                if (gi >= 0 && r > out[gi]) out[gi] = r
             }
-
-            // loudness gate
-            val sortedE = a.energy.copyOf()
-            sortedE.sort()
-            gate = if (sortedE.isNotEmpty()) 0.15f * sortedE[sortedE.size / 2] else 0f
-
-            // centroid quantiles from "interesting" frames (strong onsets + beats)
-            val cv = ArrayList<Float>()
-            for (f in 0 until frames) if (fluxRatio[f] >= 1.5f) cv.add(centroidAt(f))
-            for (i in 0 until n) cv.add(centroidAt(frameOf(beats[i])))
-            if (cv.size < 20) for (f in 0 until frames step 5) cv.add(a.centroid[f])
-            cv.sort()
-            for (j in 0 until 4) cuts[j] = if (cv.isEmpty()) 0.5f else cv[((j + 1) * cv.size / 5).coerceIn(0, cv.size - 1)]
-
-            // downbeat flags + phase (beat index of first downbeat)
-            var firstDown = -1
-            for (db in a.downbeatsMs) {
-                val idx = java.util.Arrays.binarySearch(beats, db)
-                if (idx >= 0) {
-                    downIdx[idx] = true
-                    if (firstDown < 0 || idx < firstDown) firstDown = idx
-                }
-            }
-            phase = if (firstDown >= 0) firstDown else 0
         }
 
         fun intervalAt(i: Int): Long = when {
@@ -183,6 +228,12 @@ object ChartGenerator {
             return m
         }
 
+        fun layerEnergyAt(l: Int, f: Int): Float {
+            var m = 0f
+            for (j in max(0, f - 1)..min(frames - 1, f + 2)) m = max(m, le[l][j])
+            return m
+        }
+
         fun centroidAt(f: Int): Float {
             var s = 0f
             var c = 0
@@ -193,14 +244,39 @@ object ChartGenerator {
             return if (c > 0) s / c else 0.5f
         }
 
+        fun layerCentroidAt(l: Int, f: Int): Float {
+            var s = 0f
+            var c = 0
+            for (j in max(0, f - 1)..min(frames - 1, f + 2)) {
+                s += lc[l][j]
+                c++
+            }
+            return if (c > 0) s / c else 0.5f
+        }
+
+        /** Overall-centroid lane (Easy / Normal): low = left ... high = right, quantile balanced. */
         fun laneOf(c: Float): Int {
             var lane = 0
             for (cut in cuts) if (c > cut) lane++
             return lane
         }
+
+        /** Layer-based lane: bass -> lanes 0-1, mid/arpeggio -> lanes 1-3, highs -> lanes 3-4. */
+        fun laneForLayer(l: Int, f: Int): Int {
+            val c = layerCentroidAt(l, f)
+            val q = layerCuts[l]
+            return when (l) {
+                BASS -> if (c >= q[1]) 1 else 0
+                MID -> 1 + (if (c < q[0]) 0 else if (c < q[2]) 1 else 2)
+                else -> 3 + (if (c >= q[1]) 1 else 0)
+            }
+        }
     }
 
-    private class Draft(val timeMs: Long, val k: Int, val beatIdx: Int, val strength: Float, val frame: Int) {
+    private class Draft(
+        val timeMs: Long, val k: Int, val beatIdx: Int, val strength: Float, val frame: Int,
+        val mask: Int, val dom: Int,
+    ) {
         var holdMs = 0L
         var removed = false
     }
@@ -238,24 +314,38 @@ object ChartGenerator {
         val p = paramsFor(d)
         val n = sh.n
 
-        // 1) candidate slots
+        // 1) candidate slots: a slot qualifies if ANY layer has an onset above that layer's threshold
         val stride = if (p.skipBeatsIfFast) max(1, ceil(420.0 / sh.medianInterval).toInt()) else 1
         var cands = ArrayList<Draft>()
         for (gi in 0 until n * 4) {
             val i = gi / 4
             val k = gi % 4
             if (i == n - 1 && k > 0) continue
-            val s = sh.strength[gi]
-            val ok = when (k) {
-                0 -> if (p.skipBeatsIfFast) ((i - sh.phase) % stride + stride) % stride == 0 else true
-                2 -> p.thr8 >= 0 && s >= p.thr8
-                else -> p.thr16 >= 0 && s >= p.thr16
+            var mask = 0
+            if (k == 0) {
+                if (p.skipBeatsIfFast && ((i - sh.phase) % stride + stride) % stride != 0) continue
+                for (l in 0 until 3) if (sh.layerStrength[l][gi] >= 1.5f) mask = mask or (1 shl l)
+            } else {
+                val thr = if (k == 2) p.thr8 else p.thr16
+                for (l in 0 until 3) if (thr[l] >= 0f && sh.layerStrength[l][gi] >= thr[l]) mask = mask or (1 shl l)
+                if (mask == 0) continue
             }
-            if (!ok) continue
             val t = sh.slotTime(gi)
             val f = sh.frameOf(t)
             if (sh.energyAt(f) < sh.gate) continue
-            cands.add(Draft(t, k, i, s, f))
+
+            // dominant layer = strongest (among triggered layers if any)
+            var dom = MID
+            var best = -1f
+            for (l in 0 until 3) {
+                if (mask != 0 && (mask and (1 shl l)) == 0) continue
+                val s = sh.layerStrength[l][gi]
+                if (s > best) {
+                    best = s
+                    dom = l
+                }
+            }
+            cands.add(Draft(t, k, i, sh.strength[gi], f, mask, dom))
         }
 
         // 2) minimum spacing (beats win over off-beats, then stronger onsets win)
@@ -271,7 +361,7 @@ object ChartGenerator {
         }
         cands = spaced
 
-        // 3) holds (sustained energy, no strong onset inside)
+        // 3) holds: sustained energy in the layer that triggered the note, no new strong onset in that layer
         var holdEnd = Long.MIN_VALUE
         var lastHoldBeat = -1000
         for (c in cands) {
@@ -302,7 +392,7 @@ object ChartGenerator {
             }
         }
 
-        // 4) lanes from spectral centroid, with hand-friendly movement rules + chords
+        // 4) lanes + chords
         val out = ArrayList<NoteOut>()
         val busyUntil = LongArray(5) { Long.MIN_VALUE }
         var prevLane = -1
@@ -311,8 +401,8 @@ object ChartGenerator {
         var sinceChord = 1000
         for (c in cands) {
             if (c.removed) continue
-            val cen = sh.centroidAt(c.frame)
-            var lane = sh.laneOf(cen)
+            val cen = if (p.layerLanes) sh.layerCentroidAt(c.dom, c.frame) else sh.centroidAt(c.frame)
+            var lane = if (p.layerLanes) sh.laneForLayer(c.dom, c.frame) else sh.laneOf(cen)
             val sub = when (c.k) { 0 -> 4; 2 -> 8; else -> 16 }
             if (prevLane >= 0) {
                 val gap = c.timeMs - prevT
@@ -329,12 +419,26 @@ object ChartGenerator {
             if (c.holdMs > 0) busyUntil[lane] = c.timeMs + c.holdMs
             out.add(NoteOut(c.timeMs, lane, c.holdMs, sub))
 
-            // chords / doubles on strong onsets
             sinceChord++
-            if (p.thrChord >= 0 && c.holdMs == 0L && (c.k == 0 || c.k == 2) &&
-                c.strength >= p.thrChord && sinceChord >= p.chordCooldown && p.maxChordSize >= 2
-            ) {
-                val used = hashSetOf(lane)
+            val canChord = c.holdMs == 0L && p.maxChordSize >= 2 && sinceChord >= p.chordCooldown
+            var added = 0
+            val used = hashSetOf(lane)
+
+            // (a) simultaneous layers -> chord, each layer on its own lane (polyphony = real difficulty)
+            if (canChord && p.layerLanes) {
+                for (l in 0 until 3) {
+                    if (l == c.dom || (c.mask and (1 shl l)) == 0) continue
+                    if (1 + added >= p.maxChordSize) break
+                    val fl = freeLane(sh.laneForLayer(l, c.frame), c.timeMs, busyUntil)
+                    if (fl != null && fl !in used) {
+                        used.add(fl)
+                        out.add(NoteOut(c.timeMs, fl, 0L, sub))
+                        added++
+                    }
+                }
+            }
+            // (b) very strong single hit -> mirrored double (and a centre note on Expert)
+            if (canChord && added == 0 && p.thrChord >= 0 && (c.k == 0 || c.k == 2) && c.strength >= p.thrChord) {
                 var second = 4 - lane
                 if (abs(second - lane) < 2) second = if (lane <= 2) lane + 2 else lane - 2
                 second = second.coerceIn(0, 4)
@@ -342,13 +446,18 @@ object ChartGenerator {
                 if (sl != null && sl !in used) {
                     used.add(sl)
                     out.add(NoteOut(c.timeMs, sl, 0L, sub))
+                    added++
                     if (p.maxChordSize >= 3 && c.strength >= p.thrChord * 1.5f) {
                         val tl = freeLane(2, c.timeMs, busyUntil)
-                        if (tl != null && tl !in used) out.add(NoteOut(c.timeMs, tl, 0L, sub))
+                        if (tl != null && tl !in used) {
+                            out.add(NoteOut(c.timeMs, tl, 0L, sub))
+                            added++
+                        }
                     }
-                    sinceChord = 0
                 }
             }
+            if (added > 0) sinceChord = 0
+
             prevLane = lane
             prevC = cen
             prevT = c.timeMs
@@ -358,15 +467,16 @@ object ChartGenerator {
     }
 
     private fun sustained(sh: Shared, c: Draft, endMs: Long, ratio: Float): Boolean {
-        val onsetE = sh.energyAt(c.frame)
-        if (onsetE <= sh.gate) return false
+        val l = c.dom
+        val onsetE = sh.layerEnergyAt(l, c.frame)
+        if (onsetE <= sh.layerGate[l]) return false
         val f0 = c.frame + 3
         val f1 = sh.frameOf(endMs) - 1
         if (f1 - f0 < 3) return false
         var f = f0
         while (f <= f1) {
-            if (sh.a.energy[f] < ratio * onsetE) return false
-            if (sh.fluxRatio[f] > 1.8f) return false
+            if (sh.le[l][f] < ratio * onsetE) return false
+            if (sh.layerRatio[l][f] > 1.8f) return false
             f += 2
         }
         return true

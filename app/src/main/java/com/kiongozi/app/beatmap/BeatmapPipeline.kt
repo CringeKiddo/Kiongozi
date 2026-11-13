@@ -32,6 +32,7 @@ class BeatmapPipeline(private val context: Context, private val cache: ChartCach
             return@withContext PrepareResult(it, true, key, null)
         }
         val analysis = cache.loadAnalysis(key) ?: return@withContext null
+        if (!analysis.hasBands) return@withContext null // Batch 2 cache: needs the frequency layers added
         val title = cache.listRecents().firstOrNull { it.key == key }?.title ?: "Song"
         val beatmap = ChartGenerator.generateAll(analysis, title, key)
         cache.save(key, beatmap, null, null)
@@ -61,9 +62,12 @@ class BeatmapPipeline(private val context: Context, private val cache: ChartCach
         ensureActive()
         if (mel.frameCount < 200) throw PrepareException("This audio is too short (need at least ~4 seconds)")
 
-        // ---- Stage 2: neural beat tracking ----
+        // ---- Stage 2: neural beat tracking (skipped if an older cache already has the beats) ----
+        val legacy = cache.loadAnalysis(key)
         onProgress(Progress(Stage.ANALYZING, 0f))
-        val beat = try {
+        val beat = if (legacy != null) {
+            BeatResult(legacy.beatsMs.toList(), legacy.downbeatsMs.toList(), legacy.bpm, legacy.beatsPerBar)
+        } else try {
             BeatTracker(context).use { tracker ->
                 tracker.open()
                 tracker.track(mel.store) { onProgress(Progress(Stage.ANALYZING, it)) }
@@ -71,6 +75,7 @@ class BeatmapPipeline(private val context: Context, private val cache: ChartCach
         } catch (e: NoBeatsException) {
             throw PrepareException(e.message ?: "No beat found", e)
         }
+        onProgress(Progress(Stage.ANALYZING, 1f))
         ensureActive()
 
         // ---- Stage 3: chart ----
@@ -85,6 +90,9 @@ class BeatmapPipeline(private val context: Context, private val cache: ChartCach
             flux = f.flux,
             centroid = f.centroid,
             energy = f.energy,
+            bandFlux = f.bandFlux,
+            bandEnergy = f.bandEnergy,
+            bandCentroid = f.bandCentroid,
         )
         val beatmap = ChartGenerator.generateAll(analysis, title, key)
         cache.save(key, beatmap, analysis, uri.toString())
