@@ -103,8 +103,22 @@ class GrowableFloats {
     fun toArray(): FloatArray = a.copyOf(size)
 }
 
-/** Per-frame features (50 fps) used by the chart generator. */
-class AudioFeatures(val flux: FloatArray, val centroid: FloatArray, val energy: FloatArray)
+/**
+ * Per-frame features (50 fps) used by the chart generator.
+ * Three frequency layers, each analysed independently so a quiet part (e.g. an arpeggio or vocal)
+ * is not drowned out by a loud one (e.g. the bass):
+ *   0 = BASS  (~30-540 Hz: kick, bass)
+ *   1 = MID   (~540-3000 Hz: vocals, lead, arpeggios, snare body)
+ *   2 = HIGH  (~3-11 kHz: hats, shimmer, sibilance)
+ */
+class AudioFeatures(
+    val flux: FloatArray,
+    val centroid: FloatArray,
+    val energy: FloatArray,
+    val bandFlux: Array<FloatArray>,
+    val bandEnergy: Array<FloatArray>,
+    val bandCentroid: Array<FloatArray>,
+)
 
 /** In-place radix-2 complex FFT. */
 class Fft(private val n: Int) {
@@ -193,6 +207,16 @@ class MelSpectrogram(private val p: MelParams) {
     private val centroid = GrowableFloats()
     private val energy = GrowableFloats()
 
+    // 3 frequency layers (see AudioFeatures); edges scale with nMels (20/80/128 for 128 mels)
+    private val bandEdges = intArrayOf(0, Math.round(p.nMels * 20f / 128f), Math.round(p.nMels * 80f / 128f), p.nMels)
+    private val bandOf = IntArray(p.nMels) { m -> if (m < bandEdges[1]) 0 else if (m < bandEdges[2]) 1 else 2 }
+    private val bFlux = Array(3) { GrowableFloats() }
+    private val bEnergy = Array(3) { GrowableFloats() }
+    private val bCentroid = Array(3) { GrowableFloats() }
+    private val bSum = DoubleArray(3)
+    private val bW = DoubleArray(3)
+    private val bFluxSum = FloatArray(3)
+
     // sample buffer
     private var buf = FloatArray(p.nFft * 16)
     private var bufStart = 0L
@@ -231,7 +255,10 @@ class MelSpectrogram(private val p: MelParams) {
         process(true)
     }
 
-    fun features(): AudioFeatures = AudioFeatures(flux.toArray(), centroid.toArray(), energy.toArray())
+    fun features(): AudioFeatures = AudioFeatures(
+        flux.toArray(), centroid.toArray(), energy.toArray(),
+        Array(3) { bFlux[it].toArray() }, Array(3) { bEnergy[it].toArray() }, Array(3) { bCentroid[it].toArray() },
+    )
 
     private fun sampleAt(idx: Long, final: Boolean): Float {
         var i = idx
@@ -266,6 +293,9 @@ class MelSpectrogram(private val p: MelParams) {
 
     private fun emitFrame() {
         val nm = p.nMels
+        java.util.Arrays.fill(bSum, 0.0)
+        java.util.Arrays.fill(bW, 0.0)
+        java.util.Arrays.fill(bFluxSum, 0f)
         var sum = 0.0
         var wsum = 0.0
         var fluxSum = 0f
@@ -277,9 +307,15 @@ class MelSpectrogram(private val p: MelParams) {
             wsum += acc * m
             val l = ln1p((p.logMultiplier * acc).toDouble()).toFloat()
             logFrame[m] = l
+            val b = bandOf[m]
+            bSum[b] += acc.toDouble()
+            bW[b] += acc.toDouble() * (m - bandEdges[b])
             if (havePrev) {
                 val d = l - prevLog[m]
-                if (d > 0f) fluxSum += d
+                if (d > 0f) {
+                    fluxSum += d
+                    bFluxSum[b] += d
+                }
             }
         }
         System.arraycopy(logFrame, 0, prevLog, 0, nm)
@@ -288,6 +324,12 @@ class MelSpectrogram(private val p: MelParams) {
         flux.add(fluxSum / nm)
         energy.add((sum / nm).toFloat())
         centroid.add(if (sum > 1e-9) (wsum / sum / (nm - 1)).toFloat() else 0.5f)
+        for (b in 0 until 3) {
+            val width = max(bandEdges[b + 1] - bandEdges[b], 1)
+            bFlux[b].add(bFluxSum[b] / width)
+            bEnergy[b].add((bSum[b] / width).toFloat())
+            bCentroid[b].add(if (bSum[b] > 1e-9) (bW[b] / bSum[b] / max(width - 1, 1)).toFloat() else 0.5f)
+        }
     }
 
     /** Drop samples no future frame can need (keeps one extra half-window for end reflection). */
