@@ -11,12 +11,15 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
+import com.kiongozi.app.game.AppLifecycle
+import com.kiongozi.app.game.GameArgs
+import com.kiongozi.app.ui.game.GameScreen
 import com.kiongozi.app.ui.prep.SongPrepController
 import com.kiongozi.app.ui.prep.SongPrepScreen
 import com.kiongozi.app.ui.theme.KiongoziTheme
 import com.kiongozi.app.ui.title.TitleScreen
 
-private enum class Screen { TITLE, SONG_PREP }
+private enum class Screen { TITLE, SONG_PREP, GAME }
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -28,6 +31,7 @@ class MainActivity : ComponentActivity() {
                 val context = LocalContext.current
                 val controller = remember { SongPrepController(context, scope) }
                 var screen by remember { mutableStateOf(Screen.TITLE) }
+                var gameArgs by remember { mutableStateOf<GameArgs?>(null) }
 
                 BackHandler(enabled = screen == Screen.SONG_PREP) {
                     controller.cancel()
@@ -42,9 +46,26 @@ class MainActivity : ComponentActivity() {
                             controller.cancel()
                             screen = Screen.TITLE
                         },
+                        onPlay = { args ->
+                            gameArgs = args
+                            screen = Screen.GAME
+                        },
                     )
+                    Screen.GAME -> {
+                        val args = gameArgs
+                        if (args != null) {
+                            GameScreen(args = args, onExit = { screen = Screen.SONG_PREP })
+                        } else {
+                            screen = Screen.SONG_PREP
+                        }
+                    }
                 }
             }
         }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        AppLifecycle.onPause?.invoke() // auto-pause the game when the app leaves the foreground
     }
 }
