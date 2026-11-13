@@ -82,12 +82,15 @@ class SongPrepController(context: Context, private val scope: CoroutineScope) {
         job = scope.launch {
             try {
                 val r = pipeline.loadFromCache(song.key)
-                state = if (r != null) {
-                    PrepState.Ready(r.beatmap, song.uri?.let(Uri::parse), true)
+                if (r != null) {
+                    state = PrepState.Ready(r.beatmap, song.uri?.let(Uri::parse), true)
+                    refreshRecents()
+                } else if (song.uri != null) {
+                    // old cache (needs the new frequency layers): rebuild from the audio file, reusing saved beats
+                    prepare(Uri.parse(song.uri))
                 } else {
-                    PrepState.Failed("Cached chart is missing. Pick the song again to rebuild it.")
+                    state = PrepState.Failed("This saved chart is outdated. Pick the song again to rebuild it.")
                 }
-                refreshRecents()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Throwable) {

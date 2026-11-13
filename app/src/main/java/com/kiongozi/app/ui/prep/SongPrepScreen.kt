@@ -33,6 +33,8 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Slider
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -57,15 +59,17 @@ import com.kiongozi.app.beatmap.Beatmap
 import com.kiongozi.app.beatmap.BeatmapPipeline.Stage
 import com.kiongozi.app.beatmap.CachedSong
 import com.kiongozi.app.beatmap.Difficulty
+import com.kiongozi.app.game.FpsMode
+import com.kiongozi.app.game.GameArgs
+import com.kiongozi.app.game.GameMode
+import com.kiongozi.app.game.GameSettings
 import com.kiongozi.app.ui.theme.Neon
 import com.kiongozi.app.ui.theme.NeonBackground
 import com.kiongozi.app.ui.title.NeonButton
 import kotlin.math.roundToInt
 
-private enum class ModePick(val label: String) { LANES("5-LANE SCROLL"), DIVA("FLYING TARGETS") }
-
 @Composable
-fun SongPrepScreen(controller: SongPrepController, onBack: () -> Unit) {
+fun SongPrepScreen(controller: SongPrepController, onBack: () -> Unit, onPlay: (GameArgs) -> Unit) {
     val context = LocalContext.current
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
         if (uri != null) {
@@ -102,7 +106,7 @@ fun SongPrepScreen(controller: SongPrepController, onBack: () -> Unit) {
                     }
                     PrepState.Ready::class -> {
                         val s = controller.state
-                        if (s is PrepState.Ready) ReadyView(s.beatmap, s.fromCache, onAnother = {
+                        if (s is PrepState.Ready) ReadyView(s.beatmap, s.fromCache, s.audioUri, onPlay = onPlay, onAnother = {
                             controller.reset()
                             launchPicker()
                         })
@@ -275,9 +279,16 @@ private fun StepLabel(text: String, reached: Boolean, active: Boolean) {
 // Ready: summary + difficulty/mode selection (gameplay arrives in Batch 3/4)
 // ------------------------------------------------------------------------------------------
 @Composable
-private fun ReadyView(beatmap: Beatmap, fromCache: Boolean, onAnother: () -> Unit) {
-    var difficulty by remember { mutableStateOf(Difficulty.NORMAL) }
-    var mode by remember { mutableStateOf(ModePick.LANES) }
+private fun ReadyView(beatmap: Beatmap, fromCache: Boolean, audioUri: Uri?, onPlay: (GameArgs) -> Unit, onAnother: () -> Unit) {
+    val context = LocalContext.current
+    val settings = remember { GameSettings(context) }
+    var difficulty by remember { mutableStateOf(settings.difficulty) }
+    var mode by remember { mutableStateOf(settings.mode) }
+    var fps by remember { mutableStateOf(settings.fpsMode) }
+    var approach by remember { mutableStateOf(settings.approachMs) }
+    var offset by remember { mutableStateOf(settings.audioOffsetMs) }
+    var noFail by remember { mutableStateOf(settings.noFail) }
+
     val chart = beatmap.chart(difficulty)
     val notes = chart?.notes ?: emptyList()
     val holds = notes.count { it.holdDurationMs > 0 }
@@ -297,21 +308,19 @@ private fun ReadyView(beatmap: Beatmap, fromCache: Boolean, onAnother: () -> Uni
             color = Neon.TextDim, fontSize = 13.sp,
         )
 
-        Spacer(Modifier.height(24.dp))
-        Text("DIFFICULTY", color = Neon.Magenta, fontSize = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = 3.sp)
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(22.dp))
+        Label("DIFFICULTY")
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Difficulty.values().forEach { d -> Chip(d.label, difficulty == d) { difficulty = d } }
         }
 
-        Spacer(Modifier.height(18.dp))
-        Text("MODE", color = Neon.Magenta, fontSize = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = 3.sp)
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(16.dp))
+        Label("MODE")
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            ModePick.values().forEach { m -> Chip(m.label, mode == m) { mode = m } }
+            GameMode.values().forEach { m -> Chip(m.label, mode == m) { mode = m } }
         }
 
-        Spacer(Modifier.height(22.dp))
+        Spacer(Modifier.height(18.dp))
         Column(
             Modifier
                 .fillMaxWidth()
@@ -326,7 +335,7 @@ private fun ReadyView(beatmap: Beatmap, fromCache: Boolean, onAnother: () -> Uni
                 "notes per second",
                 if (beatmap.durationMs > 0) "%.1f".format(notes.size * 1000.0 / beatmap.durationMs) else "-",
             )
-            if (mode == ModePick.LANES) {
+            if (mode == GameMode.LANES) {
                 val perLane = IntArray(5)
                 notes.forEach { perLane[it.lane.coerceIn(0, 4)]++ }
                 Stat("lanes L→R", perLane.joinToString(" · "))
@@ -335,13 +344,50 @@ private fun ReadyView(beatmap: Beatmap, fromCache: Boolean, onAnother: () -> Uni
             }
         }
 
-        Spacer(Modifier.height(22.dp))
-        NeonButton("PLAY  ·  COMING IN BATCH 3", enabled = false, onClick = {})
-        Spacer(Modifier.height(10.dp))
-        Text(
-            "Your chart is saved. Gameplay screens are built in the next batches.",
-            color = Neon.TextDim, fontSize = 12.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth(),
+        // ---- settings ----
+        Spacer(Modifier.height(20.dp))
+        Label("FRAME RATE")
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FpsMode.values().forEach { f -> Chip(f.label, fps == f) { fps = f; settings.fpsMode = f } }
+        }
+        Spacer(Modifier.height(14.dp))
+        Label("SCROLL SPEED")
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf("SLOW" to 1900, "NORMAL" to 1400, "FAST" to 1050, "MAX" to 800).forEach { (name, ms) ->
+                Chip(name, kotlin.math.abs(approach - ms) < 100) { approach = ms; settings.approachMs = ms }
+            }
+        }
+        Spacer(Modifier.height(14.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Label("AUDIO OFFSET")
+            Text("%+d ms".format(offset), color = Color.White, fontSize = 13.sp, fontFamily = FontFamily.Monospace)
+        }
+        Slider(
+            value = offset.toFloat(),
+            onValueChange = { offset = it.roundToInt(); settings.audioOffsetMs = offset },
+            valueRange = -200f..200f,
         )
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("NO-FAIL", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold, letterSpacing = 2.sp)
+                Text("Song can't end early when health hits 0", color = Neon.TextDim, fontSize = 11.sp)
+            }
+            Switch(checked = noFail, onCheckedChange = { noFail = it; settings.noFail = it })
+        }
+
+        Spacer(Modifier.height(22.dp))
+        NeonButton("PLAY", enabled = audioUri != null) {
+            settings.difficulty = difficulty
+            settings.mode = mode
+            onPlay(GameArgs(beatmap, audioUri, difficulty, mode))
+        }
+        if (audioUri == null) {
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "The original audio file isn't linked to this saved chart. Pick the song again to play it.",
+                color = Neon.Red, fontSize = 12.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth(),
+            )
+        }
         Spacer(Modifier.height(16.dp))
         Text(
             "PICK ANOTHER SONG", color = Neon.Cyan, fontSize = 13.sp, letterSpacing = 3.sp, fontWeight = FontWeight.Bold,
@@ -349,6 +395,12 @@ private fun ReadyView(beatmap: Beatmap, fromCache: Boolean, onAnother: () -> Uni
         )
         Spacer(Modifier.height(24.dp))
     }
+}
+
+@Composable
+private fun Label(text: String) {
+    Text(text, color = Neon.Magenta, fontSize = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = 3.sp)
+    Spacer(Modifier.height(8.dp))
 }
 
 @Composable
