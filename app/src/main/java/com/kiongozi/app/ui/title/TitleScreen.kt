@@ -47,7 +47,7 @@ import com.kiongozi.app.ui.theme.NeonBackground
 import kotlinx.coroutines.launch
 
 @Composable
-fun TitleScreen(onSelectSong: () -> Unit) {
+fun TitleScreen(onSelectSong: () -> Unit, onSettings: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var benchRunning by remember { mutableStateOf(false) }
@@ -97,6 +97,11 @@ fun TitleScreen(onSelectSong: () -> Unit) {
             Spacer(Modifier.height(72.dp))
 
             NeonButton("PLAY A SONG", onClick = onSelectSong)
+            Spacer(Modifier.height(14.dp))
+            Text(
+                "SETTINGS", color = Neon.Cyan, fontSize = 14.sp, letterSpacing = 4.sp, fontWeight = FontWeight.Bold,
+                modifier = Modifier.clickable { onSettings() }.padding(14.dp),
+            )
 
             Spacer(Modifier.height(20.dp))
 
