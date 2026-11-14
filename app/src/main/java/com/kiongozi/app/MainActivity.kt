@@ -16,10 +16,12 @@ import com.kiongozi.app.game.GameArgs
 import com.kiongozi.app.ui.game.GameScreen
 import com.kiongozi.app.ui.prep.SongPrepController
 import com.kiongozi.app.ui.prep.SongPrepScreen
+import com.kiongozi.app.ui.settings.CalibrationScreen
+import com.kiongozi.app.ui.settings.SettingsScreen
 import com.kiongozi.app.ui.theme.KiongoziTheme
 import com.kiongozi.app.ui.title.TitleScreen
 
-private enum class Screen { TITLE, SONG_PREP, GAME }
+private enum class Screen { TITLE, SONG_PREP, GAME, SETTINGS, CALIBRATE }
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -31,6 +33,7 @@ class MainActivity : ComponentActivity() {
                 val context = LocalContext.current
                 val controller = remember { SongPrepController(context, scope) }
                 var screen by remember { mutableStateOf(Screen.TITLE) }
+                var settingsReturn by remember { mutableStateOf(Screen.TITLE) }
                 var gameArgs by remember { mutableStateOf<GameArgs?>(null) }
 
                 BackHandler(enabled = screen == Screen.SONG_PREP) {
@@ -39,7 +42,13 @@ class MainActivity : ComponentActivity() {
                 }
 
                 when (screen) {
-                    Screen.TITLE -> TitleScreen(onSelectSong = { screen = Screen.SONG_PREP })
+                    Screen.TITLE -> TitleScreen(
+                        onSelectSong = { screen = Screen.SONG_PREP },
+                        onSettings = {
+                            settingsReturn = Screen.TITLE
+                            screen = Screen.SETTINGS
+                        },
+                    )
                     Screen.SONG_PREP -> SongPrepScreen(
                         controller = controller,
                         onBack = {
@@ -50,7 +59,16 @@ class MainActivity : ComponentActivity() {
                             gameArgs = args
                             screen = Screen.GAME
                         },
+                        onOpenSettings = {
+                            settingsReturn = Screen.SONG_PREP
+                            screen = Screen.SETTINGS
+                        },
                     )
+                    Screen.SETTINGS -> SettingsScreen(
+                        onBack = { screen = settingsReturn },
+                        onCalibrate = { screen = Screen.CALIBRATE },
+                    )
+                    Screen.CALIBRATE -> CalibrationScreen(onClose = { screen = Screen.SETTINGS })
                     Screen.GAME -> {
                         val args = gameArgs
                         if (args != null) {
