@@ -37,6 +37,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Fast safety net: catches the classic "forgot an import" mistakes in ~1 second,
+      # before the slow model export / Gradle build. Informational: it never blocks the build.
+      - name: Audit Kotlin imports
+        continue-on-error: true
+        run: python3 scripts/audit_kotlin.py
+
       # ------------------------------------------------------------------
       # 1) ONNX model: restore from cache, or export it
       #    (export runs on the GitHub CPU runner; no GPU needed for that.
@@ -143,7 +149,7 @@ jobs:
           ./gradlew --version
 
       - name: Build debug APK
-        run: ./gradlew assembleDebug --stacktrace
+        run: ./gradlew assembleDebug --stacktrace --warning-mode summary
 
       - name: Rename APK and verify it contains the model
         run: |
@@ -160,3 +166,12 @@ jobs:
           path: Kiongozi-debug.apk
           if-no-files-found: error
           retention-days: 30
+
+      - name: Upload Gradle reports (only if the build failed)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gradle-build-reports
+          path: app/build/reports
+          if-no-files-found: ignore
+          retention-days: 7
