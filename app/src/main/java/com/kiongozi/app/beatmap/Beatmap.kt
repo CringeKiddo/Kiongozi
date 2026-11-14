@@ -49,6 +49,8 @@ data class Beatmap(
     val charts: List<Chart>,
     val generatorVersion: Int,
     val generatedAtMs: Long,
+    /** 1.0 normal, 2.0 double-time grid, 0.5 half-time grid. */
+    val gridMultiplier: Float = 1f,
 ) {
     fun chart(d: Difficulty): Chart? = charts.firstOrNull { it.difficulty == d }
 
@@ -62,6 +64,7 @@ data class Beatmap(
         o.put("bpm", round(bpm * 100) / 100)
         o.put("beatsPerBar", beatsPerBar)
         o.put("generatedAtMs", generatedAtMs)
+        o.put("gridMultiplier", gridMultiplier.toDouble())
         o.put("beatsMs", JSONArray(beatsMs))
         o.put("downbeatsMs", JSONArray(downbeatsMs))
         o.put(
@@ -127,6 +130,7 @@ data class Beatmap(
                 charts = charts,
                 generatorVersion = o.optInt("generatorVersion", 0),
                 generatedAtMs = o.optLong("generatedAtMs", 0L),
+                gridMultiplier = o.optDouble("gridMultiplier", 1.0).toFloat(),
             )
         }
     }

@@ -67,8 +67,15 @@ class ChartCacheManager(private val context: Context) {
         return md.digest().joinToString("") { "%02x".format(it) }.take(32)
     }
 
-    fun loadBeatmap(key: String): Beatmap? {
-        val f = File(dir, "$key.json")
+    /** File tag for a beat-grid variant: "" = 1.0x, ".x2" = double-time, ".x05" = half-time. */
+    private fun gridTag(mult: Float) = when {
+        mult >= 1.5f -> ".x2"
+        mult <= 0.75f -> ".x05"
+        else -> ""
+    }
+
+    fun loadBeatmap(key: String, gridMultiplier: Float = 1f): Beatmap? {
+        val f = File(dir, "$key${gridTag(gridMultiplier)}.json")
         if (!f.exists()) return null
         return try {
             val b = Beatmap.fromJson(JSONObject(f.readText()))
@@ -109,7 +116,8 @@ class ChartCacheManager(private val context: Context) {
     }
 
     fun save(key: String, beatmap: Beatmap, analysis: Analysis?, sourceUri: String?) {
-        writeAtomic(File(dir, "$key.json")) { it.writeText(beatmap.toJson().toString()) }
+        writeAtomic(File(dir, "$key${gridTag(beatmap.gridMultiplier)}.json")) { it.writeText(beatmap.toJson().toString()) }
+        if (beatmap.gridMultiplier != 1f) return // grid variants don't touch the analysis or the recents entry
         if (analysis != null) {
             writeAtomic(File(dir, "$key.analysis")) { f ->
                 DataOutputStream(f.outputStream().buffered()).use { s ->
@@ -163,7 +171,15 @@ class ChartCacheManager(private val context: Context) {
         }.sortedByDescending { it.lastUsedMs }
     }
 
+    /** Drops every generated chart (all grid variants) but keeps the analysis, so they rebuild instantly. */
+    fun deleteCharts(key: String) {
+        File(dir, "$key.json").delete()
+        File(dir, "$key.x2.json").delete()
+        File(dir, "$key.x05.json").delete()
+    }
+
     fun delete(key: String) {
+        deleteCharts(key)
         File(dir, "$key.json").delete()
         File(dir, "$key.analysis").delete()
         File(dir, "$key.meta").delete()

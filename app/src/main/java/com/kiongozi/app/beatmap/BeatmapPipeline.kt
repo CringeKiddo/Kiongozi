@@ -39,6 +39,21 @@ class BeatmapPipeline(private val context: Context, private val cache: ChartCach
         PrepareResult(beatmap, true, key, null)
     }
 
+    /** Builds (or loads) the chart set for a beat-grid multiplier from the cached analysis. Fast, no AI. */
+    suspend fun loadGrid(key: String, multiplier: Float, title: String): Beatmap? = withContext(Dispatchers.IO) {
+        cache.loadBeatmap(key, multiplier)?.let { return@withContext it }
+        val a = cache.loadAnalysis(key)?.takeIf { it.hasBands } ?: return@withContext null
+        val b = ChartGenerator.generateAll(a, title, key, multiplier)
+        cache.save(key, b, null, null)
+        b
+    }
+
+    /** Deletes the cached chart JSON(s) and rebuilds them from the saved analysis. */
+    suspend fun regenerate(key: String): PrepareResult? = withContext(Dispatchers.IO) {
+        cache.deleteCharts(key)
+        loadFromCache(key)
+    }
+
     suspend fun prepare(uri: Uri, onProgress: (Progress) -> Unit): PrepareResult = withContext(Dispatchers.Default) {
         val info = cache.describe(uri)
         val key = cache.keyFor(uri, info)

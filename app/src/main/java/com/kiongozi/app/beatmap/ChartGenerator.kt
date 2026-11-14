@@ -286,9 +286,10 @@ object ChartGenerator {
     // ---------------------------------------------------------------------------------------
     // Public API
     // ---------------------------------------------------------------------------------------
-    fun generateAll(a: Analysis, title: String, songKey: String): Beatmap {
+    fun generateAll(source: Analysis, title: String, songKey: String, gridMultiplier: Float = 1f): Beatmap {
+        val a = source.withGrid(gridMultiplier)
         val sh = Shared(a)
-        val seed = songKey.hashCode().toLong()
+        val seed = songKey.hashCode().toLong() xor (gridMultiplier * 1000f).toLong()
         val charts = Difficulty.values().map { d ->
             val outs = buildLanes(sh, d)
             Chart(d, assignTargets(sh, outs, seed xor (d.ordinal * 7919L)))
@@ -304,6 +305,7 @@ object ChartGenerator {
             charts = charts,
             generatorVersion = VERSION,
             generatedAtMs = System.currentTimeMillis(),
+            gridMultiplier = gridMultiplier,
         )
     }
 
