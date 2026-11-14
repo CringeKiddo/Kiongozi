@@ -47,7 +47,7 @@ import com.kiongozi.app.game.GameArgs
 import com.kiongozi.app.game.GameMode
 import com.kiongozi.app.game.GameResults
 import com.kiongozi.app.game.GameSession
-import com.kiongozi.app.game.GameSettings
+import com.kiongozi.app.settings.SettingsRepository
 import com.kiongozi.app.game.PcmCache
 import com.kiongozi.app.game.diva.DivaGameView
 import com.kiongozi.app.game.lanes.KalpaGameView
@@ -73,11 +73,12 @@ fun GameScreen(args: GameArgs, onExit: () -> Unit) {
     val context = LocalContext.current
     val view = LocalView.current
     val scope = rememberCoroutineScope()
-    val settings = remember { GameSettings(context) }
+    val repo = remember { SettingsRepository.get(context) }
 
     var phase by remember { mutableStateOf<Phase>(Phase.Preparing(0f)) }
     var session by remember { mutableStateOf<GameSession?>(null) }
-    var offsetUi by remember { mutableStateOf(settings.audioOffsetMs) }
+    var offsetUi by remember { mutableStateOf(0) }
+    var autoPlayRun by remember { mutableStateOf(false) }
 
     // ---- immersive full screen while playing ----
     DisposableEffect(Unit) {
@@ -98,9 +99,12 @@ fun GameScreen(args: GameArgs, onExit: () -> Unit) {
         }
         try {
             val pcm = PcmCache.ensure(context, uri, args.beatmap.songKey) { phase = Phase.Preparing(it) }
-            val s = GameSession(args, pcm, settings)
+            val st = repo.current()           // one settings snapshot per song
+            offsetUi = st.audioOffsetMs
+            autoPlayRun = st.autoPlay
+            val s = GameSession(context, args, pcm, st)
             session = s
-            launch { s.background = AlbumArt.loadBlurred(context, uri) }
+            launch { s.background = AlbumArt.load(context, uri, st.blurArt) }
             s.start()
             phase = Phase.Playing
         } catch (e: CancellationException) {
@@ -117,7 +121,7 @@ fun GameScreen(args: GameArgs, onExit: () -> Unit) {
             delay(100)
             if (phase == Phase.Playing && s.isFinished()) {
                 s.sync.pause()
-                phase = Phase.Done(s.judgment.results())
+                phase = Phase.Done(s.judgment.results(autoPlayRun))
             }
         }
     }
@@ -207,7 +211,7 @@ fun GameScreen(args: GameArgs, onExit: () -> Unit) {
                 onOffsetChange = { v ->
                     val c = v.coerceIn(-200, 200)
                     offsetUi = c
-                    settings.audioOffsetMs = c
+                    scope.launch { repo.update { it.copy(audioOffsetMs = c) } }
                     session?.sync?.audioOffsetMs = c
                 },
                 onResume = { doResume() },

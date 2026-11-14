@@ -160,6 +160,10 @@ fun ResultsScreen(title: String, r: GameResults, onRetry: () -> Unit, onExit: ()
                 Spacer(Modifier.height(4.dp))
                 Text("NO-FAIL ON", color = Neon.TextDim, fontSize = 11.sp, letterSpacing = 2.sp)
             }
+            if (r.autoPlay) {
+                Spacer(Modifier.height(4.dp))
+                Text("AUTO-PLAY (BOT) · NOT A REAL SCORE", color = Neon.Violet, fontSize = 11.sp, letterSpacing = 2.sp, fontWeight = FontWeight.Bold)
+            }
 
             Spacer(Modifier.height(22.dp))
             Column(
