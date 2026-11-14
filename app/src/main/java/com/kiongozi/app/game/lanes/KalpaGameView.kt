@@ -14,6 +14,7 @@ import android.view.MotionEvent
 import com.kiongozi.app.game.EventKind
 import com.kiongozi.app.game.GameSession
 import com.kiongozi.app.game.GameSurfaceView
+import com.kiongozi.app.game.HiddenMode
 import com.kiongozi.app.game.Judgment
 import com.kiongozi.app.game.JudgmentEvent
 import com.kiongozi.app.game.LaneView
@@ -69,9 +70,9 @@ class KalpaGameView(context: Context, session: GameSession) : GameSurfaceView(co
     override fun onSizeKnown() {
         persp = session.settings.laneView == LaneView.PERSPECTIVE
         cx = w / 2f
-        laneW = min(w / 5f, h * 0.34f)
+        laneW = min(w / 5f, h * 0.34f) * settings.laneWidthScale
         judgeY = if (persp) h * 0.86f else h * 0.80f
-        noteH = max(laneW * 0.30f, 20f * dp)
+        noteH = max(laneW * 0.30f, 20f * dp) * settings.noteScale
         pxPerMs = (judgeY + noteH) / session.approachMs
         if (persp) {
             vpY = -h * 0.25f
@@ -197,6 +198,8 @@ class KalpaGameView(context: Context, session: GameSession) : GameSurfaceView(co
     private fun drawNotes(canvas: Canvas, songMs: Double) {
         val notes = judgment.notes
         val approach = session.approachMs.toDouble()
+        val ySpawn = yOf(approach, sOf(approach))
+        val fading = settings.hiddenMode != HiddenMode.OFF
         if (songMs < lastSongMs - 500.0) firstIdx = 0 // restarted
         lastSongMs = songMs
         while (firstIdx < notes.size) {
@@ -214,6 +217,7 @@ class KalpaGameView(context: Context, session: GameSession) : GameSurfaceView(co
             val sH = sOf(tHead)
             val yH = yOf(tHead, sH)
             val x = xOf(lane + 0.5f, if (n.holding) 1f else sH)
+            val fa = if (!fading || n.holding) 1f else fadeAlpha(((yH - ySpawn) / (judgeY - ySpawn)).coerceIn(0f, 1f))
 
             if (n.isHold) {
                 if (n.tailResolved && !n.broken && !n.holding) continue // completed
@@ -223,12 +227,12 @@ class KalpaGameView(context: Context, session: GameSession) : GameSurfaceView(co
                 val dead = n.broken || (n.headJudged && n.headJudgment == Judgment.MISS)
                 val sHead = if (n.holding) 1f else sH
                 val yHead = if (n.holding) judgeY else yH
-                drawHold(canvas, n.holding, dead, lane, sHead, yHead, sT, yT, c)
+                drawHold(canvas, n.holding, dead, lane, sHead, yHead, sT, yT, c, fa)
             }
             if (!n.headJudged || (n.isHold && n.holding)) {
                 val s = if (n.holding) 1f else sH
                 val y = if (n.holding) judgeY else yH
-                drawHead(canvas, x, y, s, c, 1f)
+                drawHead(canvas, x, y, s, c, fa)
             } else if (n.headJudgment == Judgment.MISS && yH < h + noteH) {
                 drawHead(canvas, x, yH, sH, Color.rgb(110, 105, 130), 0.55f) // missed notes keep falling, greyed
             }
@@ -236,7 +240,7 @@ class KalpaGameView(context: Context, session: GameSession) : GameSurfaceView(co
     }
 
     private fun drawHead(canvas: Canvas, cxNote: Float, y: Float, s: Float, c: Int, a: Float) {
-        val hw = laneW * 0.43f * s
+        val hw = laneW * 0.43f * s * min(settings.noteScale, 1.15f)
         val hh = max(noteH * s * (if (persp) 0.9f else 1f), 4f * dp)
         val r = hh * 0.38f
         val g = 5f * dp * s
@@ -253,11 +257,11 @@ class KalpaGameView(context: Context, session: GameSession) : GameSurfaceView(co
 
     private fun drawHold(
         canvas: Canvas, holding: Boolean, dead: Boolean, lane: Int,
-        sHead: Float, yHead: Float, sTail: Float, yTail: Float, c: Int,
+        sHead: Float, yHead: Float, sTail: Float, yTail: Float, c: Int, am: Float,
     ) {
         if (yHead <= yTail) return
         val color = if (dead) Color.rgb(110, 105, 130) else c
-        val aBody = if (dead) 60 else if (holding) 200 else 120
+        val aBody = ((if (dead) 60 else if (holding) 200 else 120) * am).toInt()
         val half = laneW * 0.26f
         val xh = xOf(lane + 0.5f, sHead)
         val xt = xOf(lane + 0.5f, sTail)
@@ -272,19 +276,19 @@ class KalpaGameView(context: Context, session: GameSession) : GameSurfaceView(co
             canvas.drawPath(path, fill)
         }
         // outer glow
-        fill.color = Color.argb(if (holding) 70 else 36, Color.red(color), Color.green(color), Color.blue(color))
+        fill.color = Color.argb(((if (holding) 70 else 36) * am).toInt(), Color.red(color), Color.green(color), Color.blue(color))
         ribbon(1f, 6f * dp * sHead)
         // body
         fill.color = Color.argb(aBody, Color.red(color), Color.green(color), Color.blue(color))
         ribbon(1f, 0f)
         // bright core
-        fill.color = Color.argb(if (holding) 230 else 110, 255, 255, 255)
+        fill.color = Color.argb(((if (holding) 230 else 110) * am).toInt(), 255, 255, 255)
         ribbon(0.28f, 0f)
         // tail cap
         if (yTail > -noteH * 2) {
             val capH = max(noteH * sTail * 0.44f, 3f * dp)
             val capW = (half + 3f * dp) * sTail
-            fill.color = Color.argb(if (dead) 80 else 255, Color.red(color), Color.green(color), Color.blue(color))
+            fill.color = Color.argb(((if (dead) 80 else 255) * am).toInt(), Color.red(color), Color.green(color), Color.blue(color))
             rect.set(xt - capW, yTail - capH / 2, xt + capW, yTail + capH / 2)
             canvas.drawRoundRect(rect, capH * 0.45f, capH * 0.45f, fill)
         }
@@ -316,7 +320,8 @@ class KalpaGameView(context: Context, session: GameSession) : GameSurfaceView(co
         if (lane < 0) return
         pointerLane.put(pointerId, lane)
         laneDown[lane]++
-        judgment.onPress(lane, sync.songTimeAtUptimeMs(eventTimeMs))
+        val hit = judgment.onPress(lane, sync.songTimeAtUptimeMs(eventTimeMs))
+        if (hit != null) session.hitSounds.play() // fired straight from the touch event for minimum delay
     }
 
     private fun release(pointerId: Int, eventTimeMs: Long) {
