@@ -12,6 +12,7 @@ import android.view.MotionEvent
 import com.kiongozi.app.game.EventKind
 import com.kiongozi.app.game.GameSession
 import com.kiongozi.app.game.GameSurfaceView
+import com.kiongozi.app.game.HiddenMode
 import com.kiongozi.app.game.Judgment
 import com.kiongozi.app.game.JudgmentEvent
 import com.kiongozi.app.game.TrackedNote
@@ -65,7 +66,7 @@ class DivaGameView(context: Context, session: GameSession) : GameSurfaceView(con
 
     override fun onSizeKnown() {
         val portrait = h >= w
-        btnR = min(w, h) * (if (portrait) 0.125f else 0.105f)
+        btnR = min(w, h) * (if (portrait) 0.125f else 0.105f) * settings.laneWidthScale.coerceIn(0.75f, 1f)
         val mX = 14f * dp
         val bottomPad = 22f * dp
         btnX[0] = mX + btnR;            btnY[0] = h - bottomPad - btnR * 3.3f   // triangle (left, upper)
@@ -84,7 +85,7 @@ class DivaGameView(context: Context, session: GameSession) : GameSurfaceView(con
             playW = w * 0.6f
             playH = h * 0.78f - playTop
         }
-        targetR = (min(playW, playH) * 0.085f).coerceIn(22f * dp, 40f * dp)
+        targetR = (min(playW, playH) * 0.085f).coerceIn(22f * dp, 40f * dp) * settings.noteScale
         flyDist = max(w, h) * 0.62f
     }
 
@@ -215,7 +216,8 @@ class DivaGameView(context: Context, session: GameSession) : GameSurfaceView(con
         val p = (1.0 - lead / approach).coerceIn(0.0, 1.2).toFloat()   // linear in TIME -> arrives exactly on the beat
         val b = n.track
         val color = btnColors[b]
-        val fade = min(1f, p / 0.10f)
+        val fa = if (settings.hiddenMode == HiddenMode.OFF) 1f else fadeAlpha(p.coerceIn(0f, 1f))
+        val fade = min(1f, p / 0.10f) * fa
 
         // trail
         for (k in 3 downTo 1) {
@@ -339,7 +341,8 @@ class DivaGameView(context: Context, session: GameSession) : GameSurfaceView(con
         if (b < 0) return
         pointerBtn.put(pointerId, b)
         btnDown[b]++
-        judgment.onPress(b, sync.songTimeAtUptimeMs(eventTimeMs))
+        val hit = judgment.onPress(b, sync.songTimeAtUptimeMs(eventTimeMs))
+        if (hit != null) session.hitSounds.play() // fired straight from the touch event for minimum delay
     }
 
     private fun release(pointerId: Int, eventTimeMs: Long) {
