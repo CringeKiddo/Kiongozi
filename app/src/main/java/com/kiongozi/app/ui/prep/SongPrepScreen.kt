@@ -63,6 +63,7 @@ import com.kiongozi.app.game.FpsMode
 import com.kiongozi.app.game.GameArgs
 import com.kiongozi.app.game.GameMode
 import com.kiongozi.app.game.GameSettings
+import com.kiongozi.app.game.LaneView
 import com.kiongozi.app.ui.theme.Neon
 import com.kiongozi.app.ui.theme.NeonBackground
 import com.kiongozi.app.ui.title.NeonButton
@@ -288,6 +289,7 @@ private fun ReadyView(beatmap: Beatmap, fromCache: Boolean, audioUri: Uri?, onPl
     var approach by remember { mutableStateOf(settings.approachMs) }
     var offset by remember { mutableStateOf(settings.audioOffsetMs) }
     var noFail by remember { mutableStateOf(settings.noFail) }
+    var laneView by remember { mutableStateOf(settings.laneView) }
 
     val chart = beatmap.chart(difficulty)
     val notes = chart?.notes ?: emptyList()
@@ -349,6 +351,13 @@ private fun ReadyView(beatmap: Beatmap, fromCache: Boolean, audioUri: Uri?, onPl
         Label("FRAME RATE")
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             FpsMode.values().forEach { f -> Chip(f.label, fps == f) { fps = f; settings.fpsMode = f } }
+        }
+        if (mode == GameMode.LANES) {
+            Spacer(Modifier.height(14.dp))
+            Label("LANE VIEW")
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                LaneView.values().forEach { v -> Chip(v.label, laneView == v) { laneView = v; settings.laneView = v } }
+            }
         }
         Spacer(Modifier.height(14.dp))
         Label("SCROLL SPEED")
