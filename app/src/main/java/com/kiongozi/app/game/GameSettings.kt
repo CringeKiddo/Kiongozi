@@ -10,6 +10,12 @@ enum class FpsMode(val label: String, val hz: Int) {
     FPS120("120", 120),
 }
 
+/** How the 5-lane mode is drawn. TILTED = classic perspective highway (default), FLAT = straight top-down lanes. */
+enum class LaneView(val label: String) {
+    PERSPECTIVE("TILTED"),
+    FLAT("FLAT"),
+}
+
 /** Persisted player settings (SharedPreferences). */
 class GameSettings(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences("kiongozi_settings", Context.MODE_PRIVATE)
@@ -27,6 +33,10 @@ class GameSettings(context: Context) {
     var approachMs: Int
         get() = prefs.getInt("approach", 1400).coerceIn(700, 2400)
         set(v) = prefs.edit().putInt("approach", v.coerceIn(700, 2400)).apply()
+
+    var laneView: LaneView
+        get() = LaneView.values().firstOrNull { it.name == prefs.getString("laneview", "PERSPECTIVE") } ?: LaneView.PERSPECTIVE
+        set(v) = prefs.edit().putString("laneview", v.name).apply()
 
     var noFail: Boolean
         get() = prefs.getBoolean("nofail", false)
