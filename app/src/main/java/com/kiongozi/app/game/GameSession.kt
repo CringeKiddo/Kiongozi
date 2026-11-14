@@ -1,23 +1,41 @@
 package com.kiongozi.app.game
 
+import android.content.Context
 import android.graphics.Bitmap
 import com.kiongozi.app.beatmap.Note
 import kotlin.math.max
 
-/** One play-through: audio clock + judging + settings + background, shared by the view and the UI. */
+/** Mirror Mode: flips lanes and target X positions left-to-right. */
+private fun mirrorNote(n: Note): Note = n.copy(
+    lane = 4 - n.lane,
+    x = 1f - n.x,
+    entryAngleDeg = ((180f - n.entryAngleDeg) % 360f + 360f) % 360f,
+    curve = -n.curve,
+)
+
+/** One play-through: audio clock + judging + hit sounds + settings snapshot + background. */
 class GameSession(
+    context: Context,
     val args: GameArgs,
     val pcm: PcmInfo,
     val settings: GameSettings,
 ) {
-    val notes: List<Note> = args.beatmap.chart(args.difficulty)?.notes ?: emptyList()
-    val sync = AudioSyncEngine(pcm).also { it.audioOffsetMs = settings.audioOffsetMs }
+    val notes: List<Note> = (args.beatmap.chart(args.difficulty)?.notes ?: emptyList())
+        .let { list -> if (settings.mirror) list.map { mirrorNote(it) } else list }
+
+    val sync = AudioSyncEngine(pcm).also {
+        it.audioOffsetMs = settings.audioOffsetMs
+        it.musicVolume = settings.musicVolume / 100f
+    }
+
     val judgment = JudgmentEngine(
         chartNotes = notes,
         trackOf = { n: Note -> if (args.mode == GameMode.LANES) n.lane else n.button.ordinal },
         trackCount = if (args.mode == GameMode.LANES) 5 else 4,
         noFail = settings.noFail,
     )
+
+    val hitSounds = HitSounds(context.applicationContext, settings.hitSound, settings.hitVolume)
 
     @Volatile var background: Bitmap? = null
     val approachMs: Int get() = settings.approachMs
@@ -47,6 +65,7 @@ class GameSession(
 
     fun release() {
         sync.release()
+        hitSounds.release()
         background = null
     }
 }

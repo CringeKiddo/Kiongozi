@@ -31,6 +31,7 @@ abstract class GameSurfaceView(context: Context, protected val session: GameSess
     SurfaceView(context), SurfaceHolder.Callback {
 
     protected val dp = resources.displayMetrics.density
+    protected val settings: GameSettings = session.settings
     protected val judgment = session.judgment
     protected val sync = session.sync
 
@@ -159,8 +160,14 @@ abstract class GameSurfaceView(context: Context, protected val session: GameSess
 
         sync.poll()
         songMs = sync.songTimeAtMonoNs(frameNanos)
-        if (sync.state == AudioSyncEngine.State.PLAYING) judgment.update(songMs)
-        for (ev in judgment.drainEvents()) onEvent(ev)
+        if (sync.state == AudioSyncEngine.State.PLAYING) {
+            if (settings.autoPlay) judgment.autoPlay(songMs)
+            judgment.update(songMs)
+        }
+        for (ev in judgment.drainEvents()) {
+            if (settings.autoPlay && ev.kind == EventKind.HIT) session.hitSounds.play()
+            onEvent(ev)
+        }
 
         val dtSec = (dtMs / 1000.0).toFloat()
         particles.update(dtSec)
@@ -170,10 +177,12 @@ abstract class GameSurfaceView(context: Context, protected val session: GameSess
         val canvas = holder.lockHardwareCanvas() ?: return
         try {
             drawBackground(canvas)
-            drawGame(canvas, songMs, dtSec)
+            // visual offset shifts only what is DRAWN; judging always uses the true audio time
+            drawGame(canvas, songMs - settings.visualOffsetMs, dtSec)
             particles.draw(canvas)
             popups.draw(canvas)
             drawHud(canvas)
+            drawFcBorder(canvas, dtSec)
         } finally {
             holder.unlockCanvasAndPost(canvas)
         }
@@ -205,6 +214,7 @@ abstract class GameSurfaceView(context: Context, protected val session: GameSess
                 val t = (h - dh) / 2f
                 rect.set(l, t, l + dw, t + dh)
                 c.drawBitmap(src, null, rect, bgPaint)
+                scrimPaint.color = Color.argb((settings.bgDim * 255 / 100).coerceIn(0, 242), 4, 1, 14)
                 c.drawRect(0f, 0f, w.toFloat(), h.toFloat(), scrimPaint)
             }
             bg = b
@@ -277,6 +287,53 @@ abstract class GameSurfaceView(context: Context, protected val session: GameSess
         }
     }
 
+    private var fcAlpha = 0f
+
+    /**
+     * FC / AP indicator: a glowing screen border. Gold = every judgment so far PERFECT (All-Perfect),
+     * cyan = no miss yet (Full Combo). It fades out when the first miss happens.
+     */
+    private fun drawFcBorder(canvas: Canvas, dtSec: Float) {
+        if (!settings.fcApIndicator) return
+        val s = judgment.stats()
+        val target = if (s.judged >= 1 && s.missCount == 0 && !s.failed) 1f else 0f
+        fcAlpha = if (target > fcAlpha) min(target, fcAlpha + dtSec * 3f) else max(0f, fcAlpha - dtSec * 1.6f)
+        if (fcAlpha <= 0.01f) return
+        val gold = s.imperfectCount == 0
+        val base = if (gold) 0xFFFFD34D.toInt() else 0xFF00F0FF.toInt()
+        val pulse = 0.82f + 0.18f * kotlin.math.sin(System.nanoTime() / 3.0e8).toFloat()
+        val a = fcAlpha * pulse
+        barPaint.style = Paint.Style.STROKE
+        val widths = floatArrayOf(18f * dp, 9f * dp, 3f * dp)
+        val alphas = intArrayOf(38, 90, 255)
+        for (i in 0 until 3) {
+            barPaint.strokeWidth = widths[i]
+            barPaint.color = Color.argb((alphas[i] * a).toInt(), Color.red(base), Color.green(base), Color.blue(base))
+            val inset = widths[i] / 2f
+            rect.set(inset, inset, w - inset, h - inset)
+            canvas.drawRect(rect, barPaint)
+        }
+        barPaint.style = Paint.Style.FILL
+    }
+
+    /** Sudden+ / Hidden: visibility 0..1 for a note at lane progress [p] (0 = spawn, 1 = judgment line). */
+    protected fun fadeAlpha(p: Float): Float {
+        fun smooth(a: Float, b: Float, x: Float): Float {
+            val t = ((x - a) / (b - a)).coerceIn(0f, 1f)
+            return t * t * (3f - 2f * t)
+        }
+        val sudden = when (settings.hiddenMode) {
+            HiddenMode.SUDDEN, HiddenMode.BOTH -> smooth(0.38f, 0.52f, p)
+            else -> 1f
+        }
+        val hidden = when (settings.hiddenMode) {
+            HiddenMode.HIDDEN -> 1f - smooth(0.45f, 0.60f, p)
+            HiddenMode.BOTH -> 1f - smooth(0.62f, 0.76f, p)
+            else -> 1f
+        }
+        return sudden * hidden
+    }
+
     /** Shared helper for both modes' judgment feedback. */
     protected fun popupFor(ev: JudgmentEvent, x: Float, y: Float, burstColor: Int) {
         when (ev.kind) {
@@ -287,8 +344,8 @@ abstract class GameSurfaceView(context: Context, protected val session: GameSess
                     Judgment.GREAT -> 0xFF00F0FF.toInt()
                     else -> 0xFF8D86FF.toInt()
                 }
-                val sub = if (ev.kind == EventKind.HIT && j != Judgment.PERFECT) {
-                    if (ev.deltaMs < 0) "EARLY" else "LATE"
+                val sub = if (settings.showEarlyLate && ev.kind == EventKind.HIT && j != Judgment.PERFECT) {
+                    if (ev.deltaMs < 0) "FAST" else "SLOW"
                 } else null
                 popups.spawn(if (j == Judgment.PERFECT) "PERFECT!" else j.label + "!", sub, color, x, y, ev.deltaMs < 0)
                 particles.burst(x, y, burstColor, when (j) { Judgment.PERFECT -> 22; Judgment.GREAT -> 14; else -> 8 }, 260f * dp)

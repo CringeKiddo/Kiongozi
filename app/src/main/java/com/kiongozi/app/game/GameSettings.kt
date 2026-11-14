@@ -1,7 +1,7 @@
 package com.kiongozi.app.game
 
-import android.content.Context
 import com.kiongozi.app.beatmap.Difficulty
+import kotlin.math.pow
 
 enum class FpsMode(val label: String, val hz: Int) {
     AUTO("AUTO", 0),
@@ -16,41 +16,54 @@ enum class LaneView(val label: String) {
     FLAT("FLAT"),
 }
 
-/** Persisted player settings (SharedPreferences). */
-class GameSettings(context: Context) {
-    private val prefs = context.applicationContext.getSharedPreferences("kiongozi_settings", Context.MODE_PRIVATE)
+/** Sudden+ hides notes in the top half of the lane (they fade in); Hidden fades them out past the middle. */
+enum class HiddenMode(val label: String) {
+    OFF("OFF"),
+    SUDDEN("SUDDEN+"),
+    HIDDEN("HIDDEN"),
+    BOTH("BOTH"),
+}
 
-    var fpsMode: FpsMode
-        get() = FpsMode.values().firstOrNull { it.name == prefs.getString("fps", "AUTO") } ?: FpsMode.AUTO
-        set(v) = prefs.edit().putString("fps", v.name).apply()
+enum class HitSoundType(val label: String) {
+    KEY("KEY"),
+    TAMBOURINE("TAMBOURINE"),
+    CLAP("CLAP"),
+}
 
-    /** -200..+200 ms. Positive = you hear the audio later than the clock says, so notes arrive later. */
-    var audioOffsetMs: Int
-        get() = prefs.getInt("offset", 0).coerceIn(-200, 200)
-        set(v) = prefs.edit().putInt("offset", v.coerceIn(-200, 200)).apply()
-
-    /** Time a note takes to travel from spawn to the judgment line. Lower = faster scroll. */
-    var approachMs: Int
-        get() = prefs.getInt("approach", 1400).coerceIn(700, 2400)
-        set(v) = prefs.edit().putInt("approach", v.coerceIn(700, 2400)).apply()
-
-    var laneView: LaneView
-        get() = LaneView.values().firstOrNull { it.name == prefs.getString("laneview", "PERSPECTIVE") } ?: LaneView.PERSPECTIVE
-        set(v) = prefs.edit().putString("laneview", v.name).apply()
-
-    var noFail: Boolean
-        get() = prefs.getBoolean("nofail", false)
-        set(v) = prefs.edit().putBoolean("nofail", v).apply()
-
-    var showFps: Boolean
-        get() = prefs.getBoolean("showfps", true)
-        set(v) = prefs.edit().putBoolean("showfps", v).apply()
-
-    var difficulty: Difficulty
-        get() = Difficulty.values().firstOrNull { it.name == prefs.getString("difficulty", "NORMAL") } ?: Difficulty.NORMAL
-        set(v) = prefs.edit().putString("difficulty", v.name).apply()
-
-    var mode: GameMode
-        get() = GameMode.values().firstOrNull { it.name == prefs.getString("mode", "LANES") } ?: GameMode.LANES
-        set(v) = prefs.edit().putString("mode", v.name).apply()
+/**
+ * Immutable snapshot of every user preference. Stored with Jetpack DataStore (see SettingsRepository);
+ * the game takes one snapshot when a song starts, so nothing changes mid-song by accident.
+ */
+data class GameSettings(
+    // display
+    val fpsMode: FpsMode = FpsMode.AUTO,
+    val showFps: Boolean = false,
+    // gameplay
+    val scrollSpeed: Float = 3.0f,          // 1.0x .. 9.0x in 0.5 steps
+    val laneView: LaneView = LaneView.PERSPECTIVE,
+    val laneWidthScale: Float = 1.0f,       // 0.6 .. 1.0
+    val noteScale: Float = 1.0f,            // 0.6 .. 1.5
+    // timing
+    val audioOffsetMs: Int = 0,             // -200 .. +200, positive = you hear audio later, notes arrive later
+    val visualOffsetMs: Int = 0,            // -100 .. +100, positive = notes drawn later (judging unchanged)
+    // audio
+    val musicVolume: Int = 100,             // 0 .. 100
+    val hitVolume: Int = 70,                // 0 .. 100
+    val hitSound: HitSoundType = HitSoundType.KEY,
+    // visuals
+    val bgDim: Int = 65,                    // 0 .. 95 (% darkness over the background)
+    val blurArt: Boolean = true,
+    val showEarlyLate: Boolean = true,      // FAST / SLOW under judgments
+    val fcApIndicator: Boolean = true,      // glowing border: gold = all perfect, cyan = full combo
+    // modifiers
+    val mirror: Boolean = false,
+    val noFail: Boolean = false,
+    val hiddenMode: HiddenMode = HiddenMode.OFF,
+    val autoPlay: Boolean = false,
+    // last picks
+    val difficulty: Difficulty = Difficulty.NORMAL,
+    val mode: GameMode = GameMode.LANES,
+) {
+    /** Time a note takes from spawn to the judgment line. 1.0x ~ 2.6 s ... 9.0x ~ 0.56 s. */
+    val approachMs: Int get() = (2600.0 * scrollSpeed.toDouble().pow(-0.7)).toInt().coerceIn(450, 3000)
 }

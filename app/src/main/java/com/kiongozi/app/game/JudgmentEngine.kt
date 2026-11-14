@@ -43,9 +43,10 @@ data class GameResults(
     val grade: Grade,
     val failed: Boolean,
     val noFail: Boolean,
+    val autoPlay: Boolean,
 )
 
-/** Live numbers for the HUD. */
+/** Live numbers for the HUD and the FC/AP border. */
 data class GameStats(
     val score: Int,
     val combo: Int,
@@ -54,6 +55,11 @@ data class GameStats(
     val health: Double,
     val failed: Boolean,
     val complete: Boolean,
+    /** number of judgments so far */
+    val judged: Int,
+    val missCount: Int,
+    /** hits that were not PERFECT (GREAT or GOOD) */
+    val imperfectCount: Int,
 )
 
 class TrackedNote(val index: Int, val note: Note, val track: Int) {
@@ -190,6 +196,50 @@ class JudgmentEngine(
         }
     }
 
+    /**
+     * Bot mode: plays every note perfectly at its exact time (holds are held to the end).
+     * Call every frame before [update].
+     */
+    fun autoPlay(songMs: Double) {
+        synchronized(lock) {
+            for (t in 0 until trackCount) {
+                val list = byTrack[t]
+                var i = nextHead[t]
+                while (i < list.size) {
+                    val n = list[i]
+                    if (n.headJudged) {
+                        i++
+                        continue
+                    }
+                    if (n.timeMs > songMs) break
+                    val prevHold = held[t]
+                    if (prevHold != null && prevHold.holding) { // finish an overlapping hold first
+                        prevHold.holding = false
+                        held[t] = null
+                        prevHold.tailResolved = true
+                        prevHold.resolvedAtMs = songMs
+                        award(Judgment.PERFECT, 1.0)
+                        finishNote(prevHold)
+                        emit(EventKind.TAIL_OK, Judgment.PERFECT, 0.0, t, prevHold.index, songMs)
+                    }
+                    n.headJudged = true
+                    n.headJudgment = Judgment.PERFECT
+                    n.resolvedAtMs = songMs
+                    if (n.isHold) {
+                        n.holding = true
+                        held[t] = n
+                    } else {
+                        finishNote(n)
+                    }
+                    award(Judgment.PERFECT, 1.0)
+                    emit(EventKind.HIT, Judgment.PERFECT, 0.0, t, n.index, songMs)
+                    i++
+                }
+                nextHead[t] = i
+            }
+        }
+    }
+
     /** Call every frame: resolves missed notes, hold ticks and hold completion. */
     fun update(songMs: Double) = synchronized(lock) {
         processMisses(songMs)
@@ -220,17 +270,20 @@ class JudgmentEngine(
             score = (1_000_000.0 * earned / totalPossible).roundToInt(),
             combo = combo, maxCombo = maxCombo,
             accuracy = accuracy(), health = health, failed = failed, complete = remaining <= 0,
+            judged = counts[0] + counts[1] + counts[2] + counts[3],
+            missCount = counts[3],
+            imperfectCount = counts[1] + counts[2],
         )
     }
 
-    fun results(): GameResults = synchronized(lock) {
+    fun results(autoPlay: Boolean = false): GameResults = synchronized(lock) {
         val acc = if (remaining <= 0) 100.0 * earned / totalPossible else accuracy()
         GameResults(
             score = (1_000_000.0 * earned / totalPossible).roundToInt(),
             maxCombo = maxCombo, accuracy = acc,
             perfect = counts[0], great = counts[1], good = counts[2], miss = counts[3],
             early = early, late = late, holdTicks = ticksHit, totalNotes = notes.size,
-            grade = gradeFor(acc), failed = failed, noFail = noFail,
+            grade = gradeFor(acc), failed = failed, noFail = noFail, autoPlay = autoPlay,
         )
     }
 

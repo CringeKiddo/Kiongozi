@@ -9,11 +9,12 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 /**
- * Extracts embedded cover art and returns a small, heavily blurred bitmap (about 72 px wide).
- * It is stretched over the screen later, which is itself a cheap extra blur. Null if the file has no art.
+ * Extracts embedded cover art. With [blur] on it returns a small, heavily blurred bitmap (about 72 px wide;
+ * stretching it over the screen is itself a cheap extra blur). With blur off it returns a sharper ~256 px
+ * version. Null if the file has no art.
  */
 object AlbumArt {
-    suspend fun loadBlurred(context: Context, uri: Uri): Bitmap? = withContext(Dispatchers.IO) {
+    suspend fun load(context: Context, uri: Uri, blur: Boolean): Bitmap? = withContext(Dispatchers.IO) {
         val mmr = MediaMetadataRetriever()
         try {
             mmr.setDataSource(context, uri)
@@ -25,11 +26,11 @@ object AlbumArt {
             while (bounds.outWidth / (sample * 2) >= 256) sample *= 2
             val opts = BitmapFactory.Options().apply { inSampleSize = sample }
             val full = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts) ?: return@withContext null
-            val w = 72
-            val h = (72f * full.height / full.width).toInt().coerceIn(24, 144)
+            val w = if (blur) 72 else 256
+            val h = (w.toFloat() * full.height / full.width).toInt().coerceIn(24, if (blur) 144 else 512)
             val small = Bitmap.createScaledBitmap(full, w, h, true)
             if (small !== full) full.recycle()
-            boxBlur(small, 3, 3)
+            if (blur) boxBlur(small, 3, 3) else small
         } catch (_: Exception) {
             null
         } finally {

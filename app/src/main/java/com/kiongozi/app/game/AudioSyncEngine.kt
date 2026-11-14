@@ -39,6 +39,17 @@ class AudioSyncEngine(private val pcm: PcmInfo) {
             field = v.coerceIn(MIN_OFFSET_MS, MAX_OFFSET_MS)
         }
 
+    /** 0f..1f, applied to the AudioTrack (hit sounds have their own volume). */
+    @Volatile
+    var musicVolume: Float = 1f
+        set(v) {
+            field = v.coerceIn(0f, 1f)
+            try {
+                track?.setVolume(field)
+            } catch (_: Exception) {
+            }
+        }
+
     @Volatile
     var state: State = State.IDLE
         private set
@@ -91,6 +102,10 @@ class AudioSyncEngine(private val pcm: PcmInfo) {
             .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
             .build()
         track = t
+        try {
+            t.setVolume(musicVolume)
+        } catch (_: Exception) {
+        }
         anchor = null
         anchored = false
         lastPollNs = 0L
