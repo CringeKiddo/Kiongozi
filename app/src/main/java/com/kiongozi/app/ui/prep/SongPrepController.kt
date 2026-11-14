@@ -99,6 +99,50 @@ class SongPrepController(context: Context, private val scope: CoroutineScope) {
         }
     }
 
+    /** Beat Grid Multiplier: rebuild the charts on a half- or double-time grid from the saved analysis (instant, no AI). */
+    fun setGrid(multiplier: Float) {
+        val st = state as? PrepState.Ready ?: return
+        if (kotlin.math.abs(st.beatmap.gridMultiplier - multiplier) < 0.01f) return
+        scope.launch {
+            try {
+                val b = pipeline.loadGrid(st.beatmap.songKey, multiplier, st.beatmap.title)
+                if (b != null) state = st.copy(beatmap = b)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Throwable) {
+            }
+        }
+    }
+
+    /**
+     * Regenerate Map. [full] = false: delete the cached chart JSON and rebuild it from the saved analysis (fast).
+     * [full] = true: delete everything and re-run the AI analysis from the audio file.
+     */
+    fun regenerate(full: Boolean) {
+        val st = state as? PrepState.Ready ?: return
+        val key = st.beatmap.songKey
+        if (full) {
+            val uri = st.audioUri ?: return
+            scope.launch(Dispatchers.IO) { cache.delete(key) }
+            prepare(uri)
+            return
+        }
+        job?.cancel()
+        state = PrepState.Working(st.beatmap.title, BeatmapPipeline.Stage.BUILDING, 0.5f, 0.95f)
+        job = scope.launch {
+            try {
+                val r = pipeline.regenerate(key)
+                state = if (r != null) PrepState.Ready(r.beatmap, st.audioUri, false)
+                else PrepState.Failed("Couldn't rebuild the chart. Pick the song again.")
+                refreshRecents()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                state = PrepState.Failed("${e.javaClass.simpleName}: ${e.message?.take(160)}")
+            }
+        }
+    }
+
     fun cancel() {
         job?.cancel()
         job = null

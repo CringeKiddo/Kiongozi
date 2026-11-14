@@ -37,6 +37,9 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -59,18 +62,24 @@ import com.kiongozi.app.beatmap.Beatmap
 import com.kiongozi.app.beatmap.BeatmapPipeline.Stage
 import com.kiongozi.app.beatmap.CachedSong
 import com.kiongozi.app.beatmap.Difficulty
-import com.kiongozi.app.game.FpsMode
 import com.kiongozi.app.game.GameArgs
 import com.kiongozi.app.game.GameMode
 import com.kiongozi.app.game.GameSettings
-import com.kiongozi.app.game.LaneView
+import com.kiongozi.app.game.HiddenMode
+import com.kiongozi.app.settings.SettingsRepository
+import com.kiongozi.app.ui.common.NeonChip
+import com.kiongozi.app.ui.common.NeonSlider
+import com.kiongozi.app.ui.common.NeonTextButton
+import com.kiongozi.app.ui.common.NeonToggle
+import com.kiongozi.app.ui.common.SectionTitle
+import com.kiongozi.app.beatmap.ChartStats
 import com.kiongozi.app.ui.theme.Neon
 import com.kiongozi.app.ui.theme.NeonBackground
 import com.kiongozi.app.ui.title.NeonButton
 import kotlin.math.roundToInt
 
 @Composable
-fun SongPrepScreen(controller: SongPrepController, onBack: () -> Unit, onPlay: (GameArgs) -> Unit) {
+fun SongPrepScreen(controller: SongPrepController, onBack: () -> Unit, onPlay: (GameArgs) -> Unit, onOpenSettings: () -> Unit) {
     val context = LocalContext.current
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
         if (uri != null) {
@@ -107,7 +116,7 @@ fun SongPrepScreen(controller: SongPrepController, onBack: () -> Unit, onPlay: (
                     }
                     PrepState.Ready::class -> {
                         val s = controller.state
-                        if (s is PrepState.Ready) ReadyView(s.beatmap, s.fromCache, s.audioUri, onPlay = onPlay, onAnother = {
+                        if (s is PrepState.Ready) ReadyView(s.beatmap, s.fromCache, s.audioUri, controller, onPlay = onPlay, onOpenSettings = onOpenSettings, onAnother = {
                             controller.reset()
                             launchPicker()
                         })
@@ -280,19 +289,28 @@ private fun StepLabel(text: String, reached: Boolean, active: Boolean) {
 // Ready: summary + difficulty/mode selection (gameplay arrives in Batch 3/4)
 // ------------------------------------------------------------------------------------------
 @Composable
-private fun ReadyView(beatmap: Beatmap, fromCache: Boolean, audioUri: Uri?, onPlay: (GameArgs) -> Unit, onAnother: () -> Unit) {
+private fun ReadyView(
+    beatmap: Beatmap,
+    fromCache: Boolean,
+    audioUri: Uri?,
+    controller: SongPrepController,
+    onPlay: (GameArgs) -> Unit,
+    onAnother: () -> Unit,
+    onOpenSettings: () -> Unit,
+) {
     val context = LocalContext.current
-    val settings = remember { GameSettings(context) }
-    var difficulty by remember { mutableStateOf(settings.difficulty) }
-    var mode by remember { mutableStateOf(settings.mode) }
-    var fps by remember { mutableStateOf(settings.fpsMode) }
-    var approach by remember { mutableStateOf(settings.approachMs) }
-    var offset by remember { mutableStateOf(settings.audioOffsetMs) }
-    var noFail by remember { mutableStateOf(settings.noFail) }
-    var laneView by remember { mutableStateOf(settings.laneView) }
+    val scope = rememberCoroutineScope()
+    val repo = remember { SettingsRepository.get(context) }
+    val s by repo.flow.collectAsState(initial = GameSettings())
+    fun upd(t: (GameSettings) -> GameSettings) {
+        scope.launch { repo.update(t) }
+    }
 
-    val chart = beatmap.chart(difficulty)
-    val notes = chart?.notes ?: emptyList()
+    val difficulty = s.difficulty
+    val mode = s.mode
+    val ratings = remember(beatmap) { Difficulty.values().associateWith { ChartStats.rate(beatmap, it) } }
+    val rating = ratings[difficulty]
+    val notes = beatmap.chart(difficulty)?.notes ?: emptyList()
     val holds = notes.count { it.holdDurationMs > 0 }
     val chords = notes.groupBy { it.timeMs }.count { it.value.size > 1 }
 
@@ -310,19 +328,29 @@ private fun ReadyView(beatmap: Beatmap, fromCache: Boolean, audioUri: Uri?, onPl
             color = Neon.TextDim, fontSize = 13.sp,
         )
 
-        Spacer(Modifier.height(22.dp))
-        Label("DIFFICULTY")
+        // ---- difficulty with star rating from note density ----
+        SectionTitle("DIFFICULTY")
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Difficulty.values().forEach { d -> Chip(d.label, difficulty == d) { difficulty = d } }
+            Difficulty.values().forEach { d ->
+                val r = ratings[d]
+                NeonChip(d.label, difficulty == d, if (r != null) "★ %.1f".format(r.stars) else null) { upd { it.copy(difficulty = d) } }
+            }
+        }
+        if (rating != null) {
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "Level ★ %.1f of 12   ·   %.1f notes per second".format(rating.stars, rating.nps),
+                color = Neon.TextDim, fontSize = 12.sp,
+            )
+        }
+
+        // ---- game mode (same cached chart, instant switch) ----
+        SectionTitle("MODE")
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            GameMode.values().forEach { m -> NeonChip(m.label, mode == m) { upd { it.copy(mode = m) } } }
         }
 
         Spacer(Modifier.height(16.dp))
-        Label("MODE")
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            GameMode.values().forEach { m -> Chip(m.label, mode == m) { mode = m } }
-        }
-
-        Spacer(Modifier.height(18.dp))
         Column(
             Modifier
                 .fillMaxWidth()
@@ -333,10 +361,6 @@ private fun ReadyView(beatmap: Beatmap, fromCache: Boolean, audioUri: Uri?, onPl
             Stat("notes", notes.size.toString())
             Stat("holds", holds.toString())
             Stat("chords / doubles", chords.toString())
-            Stat(
-                "notes per second",
-                if (beatmap.durationMs > 0) "%.1f".format(notes.size * 1000.0 / beatmap.durationMs) else "-",
-            )
             if (mode == GameMode.LANES) {
                 val perLane = IntArray(5)
                 notes.forEach { perLane[it.lane.coerceIn(0, 4)]++ }
@@ -346,48 +370,38 @@ private fun ReadyView(beatmap: Beatmap, fromCache: Boolean, audioUri: Uri?, onPl
             }
         }
 
-        // ---- settings ----
-        Spacer(Modifier.height(20.dp))
-        Label("FRAME RATE")
+        // ---- beat grid multiplier ----
+        SectionTitle("BEAT GRID")
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            FpsMode.values().forEach { f -> Chip(f.label, fps == f) { fps = f; settings.fpsMode = f } }
-        }
-        if (mode == GameMode.LANES) {
-            Spacer(Modifier.height(14.dp))
-            Label("LANE VIEW")
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                LaneView.values().forEach { v -> Chip(v.label, laneView == v) { laneView = v; settings.laneView = v } }
+            listOf(0.5f to "HALF-TIME", 1.0f to "NORMAL", 2.0f to "DOUBLE-TIME").forEach { (value, name) ->
+                NeonChip("%.1fx".format(value), kotlin.math.abs(beatmap.gridMultiplier - value) < 0.01f, name) { controller.setGrid(value) }
             }
         }
-        Spacer(Modifier.height(14.dp))
-        Label("SCROLL SPEED")
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            listOf("SLOW" to 1900, "NORMAL" to 1400, "FAST" to 1050, "MAX" to 800).forEach { (name, ms) ->
-                Chip(name, kotlin.math.abs(approach - ms) < 100) { approach = ms; settings.approachMs = ms }
-            }
-        }
-        Spacer(Modifier.height(14.dp))
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Label("AUDIO OFFSET")
-            Text("%+d ms".format(offset), color = Color.White, fontSize = 13.sp, fontFamily = FontFamily.Monospace)
-        }
-        Slider(
-            value = offset.toFloat(),
-            onValueChange = { offset = it.roundToInt(); settings.audioOffsetMs = offset },
-            valueRange = -200f..200f,
+        Spacer(Modifier.height(6.dp))
+        Text(
+            "Chart is built on ${beatmap.bpm.roundToInt()} BPM. If the AI locked onto half or double tempo, switch here (rebuilds instantly).",
+            color = Neon.TextDim, fontSize = 11.sp, lineHeight = 15.sp,
         )
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text("NO-FAIL", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold, letterSpacing = 2.sp)
-                Text("Song can't end early when health hits 0", color = Neon.TextDim, fontSize = 11.sp)
-            }
-            Switch(checked = noFail, onCheckedChange = { noFail = it; settings.noFail = it })
-        }
 
-        Spacer(Modifier.height(22.dp))
+        // ---- modifiers ----
+        SectionTitle("MODIFIERS")
+        NeonToggle("MIRROR MODE", "Flips lanes / target positions left-to-right", s.mirror) { v -> upd { it.copy(mirror = v) } }
+        NeonToggle("NO-FAIL", "Song can't end early when health hits 0", s.noFail) { v -> upd { it.copy(noFail = v) } }
+        NeonToggle("AUTO-PLAY (BOT)", "Watch the AI play its own chart", s.autoPlay) { v -> upd { it.copy(autoPlay = v) } }
+        Spacer(Modifier.height(8.dp))
+        Text("SUDDEN+ / HIDDEN", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold, letterSpacing = 2.sp)
+        Spacer(Modifier.height(6.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            HiddenMode.values().forEach { h -> NeonChip(h.label, s.hiddenMode == h) { upd { it.copy(hiddenMode = h) } } }
+        }
+        Spacer(Modifier.height(10.dp))
+        NeonSlider(
+            "NOTE SCROLL SPEED", s.scrollSpeed, 1f..9f, steps = 15,
+            display = { "%.1fx".format(it) },
+        ) { v -> upd { it.copy(scrollSpeed = (v * 2f).roundToInt() / 2f) } }
+
+        Spacer(Modifier.height(20.dp))
         NeonButton("PLAY", enabled = audioUri != null) {
-            settings.difficulty = difficulty
-            settings.mode = mode
             onPlay(GameArgs(beatmap, audioUri, difficulty, mode))
         }
         if (audioUri == null) {
@@ -397,19 +411,30 @@ private fun ReadyView(beatmap: Beatmap, fromCache: Boolean, audioUri: Uri?, onPl
                 color = Neon.Red, fontSize = 12.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth(),
             )
         }
+
+        Spacer(Modifier.height(18.dp))
+        NeonTextButton("REGENERATE CHART") { controller.regenerate(full = false) }
+        Spacer(Modifier.height(8.dp))
+        if (audioUri != null) {
+            NeonTextButton("FULL RE-ANALYSIS (RE-RUN AI)", Neon.TextDim) { controller.regenerate(full = true) }
+            Spacer(Modifier.height(6.dp))
+        }
+        Text(
+            "Regenerate rebuilds the chart from the saved analysis in about a second. Full re-analysis deletes everything for this song and runs the AI again.",
+            color = Neon.TextDim, fontSize = 11.sp, lineHeight = 15.sp,
+        )
+
         Spacer(Modifier.height(16.dp))
         Text(
-            "PICK ANOTHER SONG", color = Neon.Cyan, fontSize = 13.sp, letterSpacing = 3.sp, fontWeight = FontWeight.Bold,
+            "ALL SETTINGS", color = Neon.Cyan, fontSize = 13.sp, letterSpacing = 3.sp, fontWeight = FontWeight.Bold,
+            modifier = Modifier.fillMaxWidth().clickable { onOpenSettings() }.padding(12.dp), textAlign = TextAlign.Center,
+        )
+        Text(
+            "PICK ANOTHER SONG", color = Neon.TextDim, fontSize = 13.sp, letterSpacing = 3.sp, fontWeight = FontWeight.Bold,
             modifier = Modifier.fillMaxWidth().clickable { onAnother() }.padding(12.dp), textAlign = TextAlign.Center,
         )
         Spacer(Modifier.height(24.dp))
     }
-}
-
-@Composable
-private fun Label(text: String) {
-    Text(text, color = Neon.Magenta, fontSize = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = 3.sp)
-    Spacer(Modifier.height(8.dp))
 }
 
 @Composable
