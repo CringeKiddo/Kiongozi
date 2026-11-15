@@ -60,6 +60,8 @@ data class GameSettings(
     val noFail: Boolean = false,
     val hiddenMode: HiddenMode = HiddenMode.OFF,
     val autoPlay: Boolean = false,
+    /** Turns every hold note into a normal tap note. */
+    val noHolds: Boolean = false,
     // last picks
     val difficulty: Difficulty = Difficulty.NORMAL,
     val mode: GameMode = GameMode.LANES,
