@@ -22,6 +22,8 @@ class GameSession(
 ) {
     val notes: List<Note> = (args.beatmap.chart(args.difficulty)?.notes ?: emptyList())
         .let { list -> if (settings.mirror) list.map { mirrorNote(it) } else list }
+        // No-Holds modifier: every hold becomes a plain tap at its start time
+        .let { list -> if (settings.noHolds) list.map { if (it.holdDurationMs > 0) it.copy(holdDurationMs = 0) else it } else list }
 
     val sync = AudioSyncEngine(pcm).also {
         it.audioOffsetMs = settings.audioOffsetMs
