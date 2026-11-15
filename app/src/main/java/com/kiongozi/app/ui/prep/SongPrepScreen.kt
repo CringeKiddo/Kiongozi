@@ -359,7 +359,7 @@ private fun ReadyView(
                 .padding(14.dp)
         ) {
             Stat("notes", notes.size.toString())
-            Stat("holds", holds.toString())
+            Stat(if (s.noHolds) "holds (turned into taps)" else "holds", if (s.noHolds) "0" else holds.toString())
             Stat("chords / doubles", chords.toString())
             if (mode == GameMode.LANES) {
                 val perLane = IntArray(5)
@@ -388,6 +388,7 @@ private fun ReadyView(
         NeonToggle("MIRROR MODE", "Flips lanes / target positions left-to-right", s.mirror) { v -> upd { it.copy(mirror = v) } }
         NeonToggle("NO-FAIL", "Song can't end early when health hits 0", s.noFail) { v -> upd { it.copy(noFail = v) } }
         NeonToggle("AUTO-PLAY (BOT)", "Watch the AI play its own chart", s.autoPlay) { v -> upd { it.copy(autoPlay = v) } }
+        NeonToggle("NO HOLD NOTES", "Hold notes become normal taps", s.noHolds) { v -> upd { it.copy(noHolds = v) } }
         Spacer(Modifier.height(8.dp))
         Text("SUDDEN+ / HIDDEN", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold, letterSpacing = 2.sp)
         Spacer(Modifier.height(6.dp))
