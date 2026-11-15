@@ -72,6 +72,7 @@ class SettingsRepository private constructor(context: Context) {
         private val K_NOFAIL = booleanPreferencesKey("no_fail")
         private val K_HIDDEN = stringPreferencesKey("hidden_mode")
         private val K_AUTO = booleanPreferencesKey("auto_play")
+        private val K_NO_HOLDS = booleanPreferencesKey("no_holds")
         private val K_DIFF = stringPreferencesKey("difficulty")
         private val K_MODE = stringPreferencesKey("game_mode")
 
@@ -100,6 +101,7 @@ class SettingsRepository private constructor(context: Context) {
                 noFail = this[K_NOFAIL] ?: d.noFail,
                 hiddenMode = parse(this[K_HIDDEN], d.hiddenMode),
                 autoPlay = this[K_AUTO] ?: d.autoPlay,
+                noHolds = this[K_NO_HOLDS] ?: d.noHolds,
                 difficulty = parse(this[K_DIFF], d.difficulty),
                 mode = parse(this[K_MODE], d.mode),
             )
@@ -125,6 +127,7 @@ class SettingsRepository private constructor(context: Context) {
             p[K_NOFAIL] = noFail
             p[K_HIDDEN] = hiddenMode.name
             p[K_AUTO] = autoPlay
+            p[K_NO_HOLDS] = noHolds
             p[K_DIFF] = difficulty.name
             p[K_MODE] = mode.name
         }
